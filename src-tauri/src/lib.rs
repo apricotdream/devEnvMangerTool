@@ -1114,6 +1114,280 @@ fn uninstall_version(version: String) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// 包管理器（pnpm / yarn / cnpm / pm2 / bun）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PkgManagerInfo {
+    pub name: String,
+    pub installed: bool,
+    pub version: Option<String>,
+    pub bin_path: Option<String>,
+    pub data_dir: Option<String>,
+}
+
+fn find_in_path_entries(name: &str, entries: &[String]) -> Option<String> {
+    let exe = format!("{}.exe", name);
+    let cmd = format!("{}.cmd", name);
+    for dir in entries {
+        let p = Path::new(dir);
+        for cand in [p.join(&exe), p.join(&cmd), p.join(name)] {
+            if cand.exists() {
+                return Some(cand.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn pkg_data_dir(name: &str, user: &str, local: &str) -> String {
+    match name {
+        "pnpm" => format!("{}\\pnpm\\store", local),
+        "yarn" => format!("{}\\Yarn", local),
+        "cnpm" => format!("{}\\.cnpmrc", user),
+        "pm2" => format!("{}\\.pm2", user),
+        "bun" => format!("{}\\.bun", user),
+        _ => format!("{}\\.{}", user, name),
+    }
+}
+
+/// 列出包管理器状态（已装/版本/位置/数据目录）。
+#[tauri::command]
+fn list_pkg_managers() -> Vec<PkgManagerInfo> {
+    let user = std::env::var("USERPROFILE").unwrap_or_default();
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let tools = ["pnpm", "yarn", "cnpm", "pm2", "bun"];
+    // PATH 只读一次，避免每工具重复跑 PowerShell
+    let entries = get_registry_path_entries();
+    let mut out = Vec::new();
+    for name in tools {
+        let bin = find_in_path_entries(name, &entries);
+        let mut info = PkgManagerInfo {
+            name: name.to_string(),
+            installed: bin.is_some(),
+            version: None,
+            bin_path: bin.clone(),
+            data_dir: Some(pkg_data_dir(name, &user, &local)),
+        };
+        if let Some(b) = &bin {
+            // 版本命令：bun 用 --version，其余用 -v
+            let flag = if name == "bun" { "--version" } else { "-v" };
+            if let Some(v) = run_cmd(b, &[flag]) {
+                info.version = Some(v.trim().to_string());
+            }
+        }
+        out.push(info);
+    }
+    out
+}
+
+/// 安装/切换包管理器版本。npm 生态走 `npm i -g`，bun 走独立升级。
+#[tauri::command]
+fn install_pkg_manager(name: String, version: Option<String>) -> Result<String, String> {
+    let ver = version.unwrap_or_else(|| "latest".to_string());
+    if name == "bun" {
+        let entries = get_registry_path_entries();
+        if find_in_path_entries("bun", &entries).is_some() {
+            let _ = run_cmd("bun", &["upgrade", "--to", &ver]);
+            return Ok(format!("bun 升级请求已发送（目标 {}）", ver));
+        }
+        let _ = run_cmd(
+            "powershell",
+            &["-NoProfile", "-Command", "irm bun.sh/install.ps1 | iex"],
+        );
+        return Ok("bun 安装脚本已执行，请重开终端后验证".to_string());
+    }
+
+    let target = format!("{}@{}", name, ver);
+    let out = Command::new("npm.cmd")
+        .args(["install", "-g", &target])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(format!("已安装 {}", target))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 项目级管理（打开项目目录，解析 .nvmrc / package.json / 项目 .npmrc）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInfo {
+    pub path: String,
+    pub node_requirement: Option<String>,
+    pub requirement_source: Option<String>,
+    pub package_manager: Option<String>,
+    pub registry: Option<String>,
+    pub has_nvmrc: bool,
+    pub has_package_json: bool,
+    pub has_npmrc: bool,
+    pub current_node: Option<String>,
+    pub node_installed: bool,
+}
+
+fn resolve_nvmrc(content: &str) -> Option<String> {
+    let t = content.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // 完整版本 v18.20.0 / 18.20.0
+    if let Some(v) = regex::Regex::new(r"^v?(\d+\.\d+\.\d+)$")
+        .ok()
+        .and_then(|re| re.captures(t))
+        .map(|c| format!("v{}", &c[1]))
+    {
+        return Some(v);
+    }
+    // 裸主版本 18 -> 解析为该大版本最新
+    if let Some(m) = regex::Regex::new(r"^(\d+)$")
+        .ok()
+        .and_then(|re| re.captures(t))
+        .map(|c| c[1].parse::<i32>().unwrap_or(0))
+    {
+        let info = list_versions();
+        let best = info
+            .available
+            .iter()
+            .find(|v| v.starts_with(&format!("v{}.", m)));
+        return best.cloned();
+    }
+    // lts / lts/* / node -> 最新 LTS
+    if t == "lts" || t.starts_with("lts/") || t == "node" {
+        let info = list_versions();
+        // available 按大版本降序，第一个偶数主版本即最新 LTS
+        return info
+            .available
+            .iter()
+            .find(|v| {
+                v.strip_prefix('v')
+                    .and_then(|s| s.split('.').next())
+                    .and_then(|m| m.parse::<i32>().ok())
+                    .map(|m| m % 2 == 0)
+                    .unwrap_or(false)
+            })
+            .cloned();
+    }
+    None
+}
+
+/// 解析项目目录，返回项目要求的 Node/包管理器/registry，并与全局对比。
+#[tauri::command]
+fn inspect_project(path: String) -> Result<ProjectInfo, String> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err("路径不是有效目录".to_string());
+    }
+
+    let mut info = ProjectInfo {
+        path: path.clone(),
+        node_requirement: None,
+        requirement_source: None,
+        package_manager: None,
+        registry: None,
+        has_nvmrc: false,
+        has_package_json: false,
+        has_npmrc: false,
+        current_node: None,
+        node_installed: false,
+    };
+
+    // .nvmrc
+    let nvmrc = p.join(".nvmrc");
+    if nvmrc.exists() {
+        info.has_nvmrc = true;
+        if let Ok(content) = std::fs::read_to_string(&nvmrc) {
+            info.node_requirement = resolve_nvmrc(&content);
+            info.requirement_source = Some(".nvmrc".to_string());
+        }
+    }
+
+    // package.json
+    let pkg = p.join("package.json");
+    if pkg.exists() {
+        info.has_package_json = true;
+        if let Ok(content) = std::fs::read_to_string(&pkg) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if info.node_requirement.is_none() {
+                    if let Some(eng) = json.get("engines").and_then(|e| e.get("node")).and_then(|n| n.as_str()) {
+                        // engines 可能是 ">=18" / "18.x" / "20" —— 取能解析的
+                        if let Some(v) = resolve_nvmrc(eng) {
+                            info.node_requirement = Some(v);
+                            info.requirement_source = Some("package.json engines".to_string());
+                        }
+                    }
+                }
+                if let Some(pm) = json.get("packageManager").and_then(|m| m.as_str()) {
+                    info.package_manager = Some(pm.to_string());
+                }
+            }
+        }
+    }
+
+    // 项目 .npmrc
+    let npmrc = p.join(".npmrc");
+    if npmrc.exists() {
+        info.has_npmrc = true;
+        if let Ok(content) = std::fs::read_to_string(&npmrc) {
+            for line in content.lines() {
+                if let Some(v) = line.trim().strip_prefix("registry=") {
+                    info.registry = Some(v.trim().to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    // 全局当前 node
+    info.current_node = detect_current_node_version();
+
+    // 要求的版本是否已安装
+    if let Some(req) = &info.node_requirement {
+        let root = node_install_root();
+        info.node_installed = Path::new(&format!("{}\\{}\\node.exe", root, req)).exists();
+    }
+
+    Ok(info)
+}
+
+/// 应用项目配置：安装+切换 Node 版本，激活包管理器。
+#[tauri::command]
+fn apply_project(path: String) -> Result<String, String> {
+    let info = inspect_project(path.clone())?;
+    let mut msgs = Vec::new();
+
+    // 1. Node 版本
+    if let Some(req) = &info.node_requirement {
+        if !info.node_installed {
+            let dir = install_specific(req, |stage| {
+                let _ = stage;
+            })?;
+            msgs.push(format!("已安装 Node {}", req));
+            let _ = dir;
+        }
+        let target = format!("{}\\{}", node_install_root(), req);
+        if Path::new(&format!("{}\\node.exe", target)).exists() {
+            update_user_path_for_node(&target)?;
+            msgs.push(format!("Node 已切换到 {}", req));
+        }
+    } else {
+        msgs.push("未检测到项目 Node 版本要求（.nvmrc / engines）".to_string());
+    }
+
+    // 2. 包管理器（package.json packageManager -> corepack）
+    if let Some(pm) = &info.package_manager {
+        let _ = run_cmd("corepack", &["use", pm]);
+        msgs.push(format!("corepack 已激活 {}", pm));
+    }
+
+    Ok(msgs.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
 // CLI API（无 GUI 版本复用，不含 #[tauri::command] 宏）
 // ---------------------------------------------------------------------------
 
@@ -1174,6 +1448,10 @@ pub fn run() {
             uninstall_version,
             nvm_info,
             uninstall_nvm,
+            list_pkg_managers,
+            install_pkg_manager,
+            inspect_project,
+            apply_project,
             git_cmds::git_list_accounts,
             git_cmds::git_get_identity,
             git_cmds::git_get_stats,

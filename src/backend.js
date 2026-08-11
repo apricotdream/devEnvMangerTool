@@ -310,5 +310,65 @@
       await _delay(100);
       return null;
     },
+
+    async gitOpenInManager(path, select) {
+      if (IS_TAURI) return _invoke("git_open_in_manager", { path, select });
+      await _delay(100);
+      return null;
+    },
+
+    /* ---------------- 包管理器 ---------------- */
+
+    async listPkgManagers() {
+      if (IS_TAURI) return _invoke("list_pkg_managers");
+      await _delay(200);
+      return [
+        { name: "pnpm", installed: true, version: "9.15.0", binPath: "C:\\...\\pnpm.cmd", dataDir: "C:\\Users\\dev\\AppData\\Local\\pnpm\\store" },
+        { name: "yarn", installed: true, version: "1.22.22", binPath: "C:\\...\\yarn.cmd", dataDir: "C:\\Users\\dev\\AppData\\Local\\Yarn" },
+        { name: "cnpm", installed: false, version: null, binPath: null, dataDir: "C:\\Users\\dev\\.cnpmrc" },
+        { name: "pm2", installed: true, version: "5.4.2", binPath: "C:\\...\\pm2.cmd", dataDir: "C:\\Users\\dev\\.pm2" },
+        { name: "bun", installed: true, version: "1.2.3", binPath: "C:\\Users\\dev\\.bun\\bin\\bun.exe", dataDir: "C:\\Users\\dev\\.bun" },
+      ];
+    },
+
+    async installPkgManager(name, version) {
+      if (IS_TAURI) return _invoke("install_pkg_manager", { name, version });
+      await _delay(800);
+      return `${name}@${version || "latest"} 已安装（模拟）`;
+    },
+
+    /* ---------------- 项目管理 ---------------- */
+
+    async pickProject() {
+      if (IS_TAURI && window.__TAURI__.dialog) {
+        const sel = await window.__TAURI__.dialog.open({ directory: true, title: "选择项目目录" });
+        return typeof sel === "string" ? sel : "";
+      }
+      await _delay(100);
+      return "";
+    },
+
+    async inspectProject(path) {
+      if (IS_TAURI) return _invoke("inspect_project", { path });
+      await _delay(300);
+      return {
+        path,
+        nodeRequirement: "v18.20.0",
+        requirementSource: ".nvmrc",
+        packageManager: "pnpm@9.15.0",
+        registry: "https://registry.npmmirror.com",
+        hasNvmrc: true,
+        hasPackageJson: true,
+        hasNpmrc: true,
+        currentNode: "v26.7.0",
+        nodeInstalled: true,
+      };
+    },
+
+    async applyProject(path) {
+      if (IS_TAURI) return _invoke("apply_project", { path });
+      await _delay(500);
+      return "已应用项目配置（模拟）";
+    },
   };
 })();

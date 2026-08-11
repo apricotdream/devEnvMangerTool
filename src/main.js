@@ -103,6 +103,15 @@
     btnGitSyncRepo: $("#btnGitSyncRepo"),
     gitSyncResult: $("#gitSyncResult"),
     _gitSelectedAlias: null,
+    // 包管理器
+    btnPkgRefresh: $("#btnPkgRefresh"),
+    pkgList: $("#pkgList"),
+    // 项目管理
+    btnOpenProject: $("#btnOpenProject"),
+    projectStatus: $("#projectStatus"),
+    projectInfo: $("#projectInfo"),
+    btnApplyProject: $("#btnApplyProject"),
+    _projectPath: null,
   };
 
   let detecting = false;
@@ -379,6 +388,8 @@
     $("#tabPanel" + n).classList.remove("hidden");
     if (n == 3) loadVersions();
     if (n == 4) loadAccounts();
+    if (n == 6) loadPkgManagers();
+    if (n == 7) loadProject();
   }
 
   function bindTabs() {
@@ -1078,6 +1089,156 @@
     }
   }
 
+  /* ---------------- 包管理器 Tab ---------------- */
+
+  async function loadPkgManagers() {
+    try {
+      const managers = await window.Backend.listPkgManagers();
+      renderPkgManagers(managers);
+    } catch (e) {
+      log("err", `加载包管理器失败: ${e.message}`);
+    }
+  }
+
+  function renderPkgManagers(managers) {
+    const list = els.pkgList;
+    list.innerHTML = "";
+    managers.forEach((m) => {
+      const div = document.createElement("div");
+      div.className = "pkg-item" + (m.installed ? " installed" : "");
+      const dot = m.installed ? "ok" : "err";
+      div.innerHTML =
+        `<span class="pkg-name">${escapeHtml(m.name)}</span>` +
+        `<div class="pkg-body">` +
+        `<div class="pkg-version"><span class="state-dot ${dot}"></span> ${m.installed ? escapeHtml(m.version || "已安装") : "未安装"}</div>` +
+        `<div class="pkg-meta">${m.binPath ? escapeHtml(m.binPath) : "位置: -"}${m.dataDir ? "  |  数据: " + escapeHtml(m.dataDir) : ""}</div>` +
+        `</div>` +
+        `<div class="pkg-actions">` +
+        `<button class="btn btn-mini btn-ghost" data-act="install" data-name="${m.name}">安装/切换</button>` +
+        (m.installed && m.dataDir ? `<button class="btn btn-mini btn-ghost" data-act="opendir" data-dir="${m.dataDir}">数据目录</button>` : "") +
+        `</div>`;
+      list.appendChild(div);
+    });
+  }
+
+  function onPkgAction(e) {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const act = btn.dataset.act;
+    const name = btn.dataset.name;
+    if (act === "install") installPkg(name);
+    else if (act === "opendir") {
+      window.Backend.gitOpenInManager(btn.dataset.dir, false).catch(() => {});
+    }
+  }
+
+  async function installPkg(name) {
+    const isBun = name === "bun";
+    const hint = isBun
+      ? `安装/升级 bun（目标版本，如 v1.2.3；留空为最新）`
+      : `安装/切换 ${name} 版本（如 9.0.0；留空为 latest）`;
+    const ok = await showModal(`安装/切换 ${name}`, hint, "继续");
+    if (!ok) return;
+    // 用一个简单的 prompt 替代：console 提示 + 默认 latest
+    const version = await promptVersion(name);
+    if (version === null) return;
+    try {
+      const res = await window.Backend.installPkgManager(name, version || null);
+      log("info", res);
+      loadPkgManagers();
+    } catch (err) {
+      log("err", `安装失败: ${err}`);
+    }
+  }
+
+  function promptVersion(name) {
+    // 用浏览器 prompt 简单实现（WebView2 支持）；失败回退 latest
+    try {
+      const v = window.prompt(`输入 ${name} 版本（留空 = latest）`, "");
+      return v;
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  /* ---------------- 项目管理 Tab ---------------- */
+
+  function loadProject() {
+    // 有已打开项目则重新解析，否则显示空状态
+    if (els._projectPath) {
+      inspectProject(els._projectPath);
+    }
+  }
+
+  async function openProject() {
+    const path = await window.Backend.pickProject();
+    if (path) {
+      els._projectPath = path;
+      inspectProject(path);
+    }
+  }
+
+  async function inspectProject(path) {
+    els.projectStatus.textContent = `正在解析 ${path} …`;
+    try {
+      const info = await window.Backend.inspectProject(path);
+      renderProjectInfo(info);
+    } catch (e) {
+      els.projectStatus.textContent = `解析失败: ${e.message}`;
+    }
+  }
+
+  function renderProjectInfo(info) {
+    els.projectStatus.textContent = `项目: ${info.path}`;
+    const box = els.projectInfo;
+    let html = "";
+    const nodeState = info.nodeRequirement
+      ? info.nodeInstalled
+        ? "已安装"
+        : "未安装"
+      : "-";
+    const nodeMatch =
+      info.nodeRequirement && info.currentNode
+        ? info.nodeRequirement === info.currentNode
+          ? "一致"
+          : `需从 ${info.currentNode} 切换`
+        : "-";
+    html +=
+      `<div class="pkg-item"><span class="pkg-name">Node</span><div class="pkg-body">` +
+      `<div class="pkg-version"><span class="state-dot ${info.nodeInstalled ? "ok" : "warn"}"></span> 要求 ${escapeHtml(info.nodeRequirement || "-")}（${escapeHtml(info.requirementSource || "")}）</div>` +
+      `<div class="pkg-meta">状态: ${nodeState} · 当前全局: ${escapeHtml(info.currentNode || "-")} · ${nodeMatch}</div>` +
+      `</div></div>`;
+    html +=
+      `<div class="pkg-item"><span class="pkg-name">包管理器</span><div class="pkg-body">` +
+      `<div class="pkg-version">${escapeHtml(info.packageManager || "未指定")}</div>` +
+      `<div class="pkg-meta">来源: package.json packageManager（corepack）</div>` +
+      `</div></div>`;
+    html +=
+      `<div class="pkg-item"><span class="pkg-name">registry</span><div class="pkg-body">` +
+      `<div class="pkg-version mono">${escapeHtml(info.registry || "未指定（使用全局）")}</div>` +
+      `<div class="pkg-meta">来源: 项目 ${info.hasNpmrc ? ".npmrc" : "（无项目 .npmrc）"}</div>` +
+      `</div></div>`;
+    box.innerHTML = html;
+  }
+
+  async function applyProject() {
+    const path = els._projectPath;
+    if (!path) {
+      log("warn", "请先打开一个项目目录");
+      return;
+    }
+    const ok = await showModal("应用项目配置", `将按项目要求安装/切换 Node 版本，并激活包管理器。\n\n项目: ${path}`, "应用");
+    if (!ok) return;
+    try {
+      const res = await window.Backend.applyProject(path);
+      log("info", res);
+      inspectProject(path);
+      runDetect(false);
+    } catch (e) {
+      log("err", `应用失败: ${e}`);
+    }
+  }
+
   /* ---------------- 确认弹窗 ---------------- */
 
   function showModal(title, body, confirmText = "确认执行") {
@@ -1276,6 +1437,14 @@
     els.btnGitSwitchLocal.addEventListener("click", gitSwitchLocal);
     els.btnGitCopyPubKey.addEventListener("click", gitCopyPubKey);
     els.btnGitKeyUrl.addEventListener("click", gitOpenKeyUrl);
+
+    // 包管理器
+    els.btnPkgRefresh.addEventListener("click", loadPkgManagers);
+    els.pkgList.addEventListener("click", onPkgAction);
+
+    // 项目管理
+    els.btnOpenProject.addEventListener("click", openProject);
+    els.btnApplyProject.addEventListener("click", applyProject);
 
     // Esc 关闭弹窗
     document.addEventListener("keydown", (e) => {

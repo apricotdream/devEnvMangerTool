@@ -705,6 +705,29 @@ body {
 .secret-input input { flex: 1; min-width: 0; }
 .form-actions { display: flex; gap: 10px; margin-top: 4px; }
 
+/* 包管理器卡片 */
+.pkg-list { display: flex; flex-direction: column; gap: 8px; }
+.pkg-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.pkg-item.installed {
+  border-color: rgba(var(--ok-rgb), 0.45);
+  background: rgba(var(--ok-rgb), 0.06);
+}
+.pkg-item.installed .pkg-name { color: var(--ok); }
+.pkg-item .pkg-name { font-size: 14px; font-weight: 700; width: 64px; flex-shrink: 0; }
+.pkg-item .pkg-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.pkg-item .pkg-version { font-family: var(--mono); font-size: 13px; }
+.pkg-item .pkg-meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pkg-item .pkg-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
 /* SSH 公钥文本框：全宽、可纵向拉伸 */
 .pubkey-box {
   width: 100%;
