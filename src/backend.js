@@ -221,5 +221,94 @@
       await _delay(400);
       return "已卸载 nvm（模拟）";
     },
+
+    /* ---------------- Git ---------------- */
+
+    async gitListAccounts() {
+      if (IS_TAURI) return _invoke("git_list_accounts");
+      await _delay(200);
+      return [];
+    },
+
+    async gitAddAccount(account, generateKey) {
+      if (IS_TAURI) return _invoke("git_add_account", { account, generateKey });
+      await _delay(300);
+      return account;
+    },
+
+    async gitUpdateAccount(sourceAlias, account, generateKey) {
+      if (IS_TAURI) return _invoke("git_update_account", { sourceAlias, account, generateKey });
+      await _delay(300);
+      return account;
+    },
+
+    async gitDeleteAccount(alias, deleteKeys) {
+      if (IS_TAURI) return _invoke("git_delete_account", { alias, deleteKeys });
+      await _delay(200);
+      return null;
+    },
+
+    async gitTestConnection(alias) {
+      if (IS_TAURI) return _invoke("git_test_connection", { alias });
+      await _delay(800);
+      return { success: true, output: "模拟连接成功" };
+    },
+
+    async gitSwitchIdentity(alias, local, cwd) {
+      if (IS_TAURI) return _invoke("git_switch_identity", { alias, local, cwd });
+      await _delay(300);
+      return { alias, hostName: "", port: "22", sshUser: "git", keyPath: null, gitName: "", gitEmail: "" };
+    },
+
+    async gitGetIdentity(local, cwd) {
+      if (IS_TAURI) return _invoke("git_get_identity", { local, cwd });
+      await _delay(150);
+      return { name: null, email: null };
+    },
+
+    async gitSyncRepo(repo) {
+      if (IS_TAURI) return _invoke("git_sync_repo", { repo });
+      await _delay(600);
+      return { alias: "mock", output: "模拟同步完成" };
+    },
+
+    async gitReadPublicKey(keyPath) {
+      if (IS_TAURI) return _invoke("git_read_public_key", { keyPath });
+      await _delay(150);
+      return "ssh-rsa AAAA... 模拟公钥";
+    },
+
+    async gitGenerateKey(alias, email, keyPath) {
+      if (IS_TAURI) return _invoke("git_generate_key", { alias, email, keyPath });
+      await _delay(400);
+      return "C:\\Users\\dev\\.ssh\\id_rsa_" + alias;
+    },
+
+    async gitPickRepo() {
+      if (IS_TAURI && window.__TAURI__.dialog) {
+        const sel = await window.__TAURI__.dialog.open({ directory: true, title: "选择仓库目录" });
+        return typeof sel === "string" ? sel : "";
+      }
+      await _delay(100);
+      return "";
+    },
+
+    async gitCheckEnv() {
+      if (IS_TAURI) return _invoke("git_check_env");
+      await _delay(100);
+      return { git: true, ssh: true };
+    },
+
+    async gitGetKeyUrl(alias) {
+      if (IS_TAURI) return _invoke("git_get_key_url", { alias });
+      await _delay(150);
+      return "https://github.com/settings/keys";
+    },
+
+    async gitOpenUrl(url) {
+      if (IS_TAURI) return _invoke("git_open_url", { url });
+      await _delay(100);
+      return null;
+    },
   };
 })();

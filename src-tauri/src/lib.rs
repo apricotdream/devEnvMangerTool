@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
+mod git_cmds;
+mod gitcore;
+
 // ---------------------------------------------------------------------------
 // 数据结构（字段名对齐前端 camelCase）
 // ---------------------------------------------------------------------------
@@ -232,6 +235,7 @@ fn latest_lts(html: &str) -> Option<String> {
 fn probe_curl(endpoint: &str, auth_args: &[&str]) -> (u16, Option<u64>, Option<f64>) {
     let mut args: Vec<&str> = vec![
         "-s",
+        "-k", // 忽略自签名 HTTPS 证书（私有源常见）
         "-o",
         "NUL",
         "-w",
@@ -655,23 +659,19 @@ fn detect_node() -> NodeEnvInfo {
         }
     }
 
-    let path = std::env::var("PATH").unwrap_or_default();
     let apps_norm = windows_apps_dir().map(|d| d.to_lowercase());
-    for dir in path.split(';') {
-        let dir = dir.trim();
-        if dir.is_empty() {
-            continue;
-        }
+    // 读注册表 PATH（机器+用户），不依赖过期的进程环境
+    for dir in get_registry_path_entries() {
         if let Some(apps) = &apps_norm {
             if dir.to_lowercase() == *apps {
                 continue;
             }
         }
-        let cand = Path::new(dir).join("node.exe");
+        let cand = Path::new(&dir).join("node.exe");
         if cand.exists() {
             info.real_node_exe = Some(cand.to_string_lossy().to_string());
             info.in_path = true;
-            info.node_dir_in_path = Some(dir.to_string());
+            info.node_dir_in_path = Some(dir.clone());
             break;
         }
     }
@@ -1119,7 +1119,10 @@ fn uninstall_version(version: String) -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let service = gitcore::service::Service::new(None).expect("初始化 Git 服务失败");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(git_cmds::ServiceState(std::sync::Arc::new(std::sync::Mutex::new(service))))
         .invoke_handler(tauri::generate_handler![
             detect_node,
             read_registry,
@@ -1137,7 +1140,28 @@ pub fn run() {
             switch_version,
             uninstall_version,
             nvm_info,
-            uninstall_nvm
+            uninstall_nvm,
+            git_cmds::git_list_accounts,
+            git_cmds::git_get_identity,
+            git_cmds::git_get_stats,
+            git_cmds::git_add_account,
+            git_cmds::git_update_account,
+            git_cmds::git_delete_account,
+            git_cmds::git_test_connection,
+            git_cmds::git_switch_identity,
+            git_cmds::git_sync_repo,
+            git_cmds::git_is_git_repo,
+            git_cmds::git_generate_key,
+            git_cmds::git_regenerate_key,
+            git_cmds::git_read_public_key,
+            git_cmds::git_get_key_url,
+            git_cmds::git_default_key_path,
+            git_cmds::git_home_dir,
+            git_cmds::git_ssh_config_path,
+            git_cmds::git_ssh_dir,
+            git_cmds::git_open_in_manager,
+            git_cmds::git_open_url,
+            git_cmds::git_check_env
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

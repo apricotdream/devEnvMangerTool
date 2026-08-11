@@ -25,6 +25,10 @@
           Node.js
           <span class="nav-check">✓</span>
         </button>
+        <button class="nav-item" data-page="git">
+          <span class="nav-dot" style="--dot:#f05133"></span>
+          Git
+        </button>
         <button class="nav-item disabled" data-page="go">
           <span class="nav-dot" style="--dot:#00acd7"></span>
           Go
@@ -66,12 +70,20 @@
         </div>
       </header>
 
-      <!-- Tab 栏 -->
+      <!-- Node 页的 Tab 栏（Git/Go/Python 页隐藏） -->
       <nav class="tab-bar" id="tabBar">
         <button class="tab-item active" data-tab="1">环境诊断</button>
         <button class="tab-item" data-tab="2">镜像源</button>
         <button class="tab-item" data-tab="3">Node 版本</button>
         <button class="tab-item" data-tab="4">上传登录</button>
+      </nav>
+
+      <!-- Git 页的 Tab 栏（仅 Git 页显示） -->
+      <nav class="tab-bar hidden" id="gitTabBar">
+        <button class="tab-item active" data-gtab="1">账号管理</button>
+        <button class="tab-item" data-gtab="2">SSH 密钥</button>
+        <button class="tab-item" data-gtab="3">身份切换</button>
+        <button class="tab-item" data-gtab="4">仓库同步</button>
       </nav>
 
       <!-- Tab 1: 环境诊断 -->
@@ -275,6 +287,154 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- Git 页（拆分为 4 个子 Tab） -->
+      <section class="tab-panel hidden" id="tabPanel5">
+
+        <!-- 子 Tab 1: 账号管理 -->
+        <div class="git-panel" id="gitPanel1">
+          <div id="gitEnvBanner" class="nvm-banner hidden"></div>
+
+          <div class="cards overview">
+            <div class="card overview-item">
+              <div class="overview-label">Git 账号</div>
+              <div class="overview-value" id="gitOvAccounts">-</div>
+            </div>
+            <div class="card overview-item">
+              <div class="overview-label">全局身份</div>
+              <div class="overview-value" id="gitOvIdentity" style="font-size:13px">-</div>
+            </div>
+            <div class="card overview-item">
+              <div class="overview-label">SSH 密钥</div>
+              <div class="overview-value" id="gitOvKeys">-</div>
+            </div>
+            <div class="card overview-item">
+              <div class="overview-label">git/ssh</div>
+              <div class="overview-value" id="gitOvEnv">-</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>Git 账号</h3>
+              <div class="version-actions">
+                <button id="btnGitRefresh" class="btn btn-mini btn-ghost">刷新</button>
+                <button id="btnGitAdd" class="btn btn-mini btn-primary">+ 新增账号</button>
+              </div>
+            </div>
+            <div id="gitAccountList" class="account-list">
+              <div class="empty">暂无 Git 账号</div>
+            </div>
+
+            <div id="gitAccountForm" class="account-form hidden">
+              <input type="hidden" id="gitSourceAlias" />
+              <div class="form-row">
+                <div class="form-field">
+                  <label>Host 别名</label>
+                  <input id="gitAlias" type="text" placeholder="github-work" />
+                </div>
+                <div class="form-field">
+                  <label>主机地址</label>
+                  <input id="gitHostName" type="text" placeholder="github.com" />
+                </div>
+                <div class="form-field">
+                  <label>SSH 端口</label>
+                  <input id="gitPort" type="number" min="1" max="65535" value="22" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-field">
+                  <label>SSH 用户</label>
+                  <input id="gitSshUser" type="text" value="git" />
+                </div>
+                <div class="form-field">
+                  <label>Git 用户名</label>
+                  <input id="gitName" type="text" placeholder="你的用户名" />
+                </div>
+                <div class="form-field">
+                  <label>Git 邮箱</label>
+                  <input id="gitEmail" type="text" placeholder="you@example.com" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-field">
+                  <label>私钥路径（留空自动）</label>
+                  <input id="gitKeyPath" class="mono" type="text" placeholder="C:\Users\you\.ssh\id_rsa_github" />
+                </div>
+                <div class="form-field">
+                  <label style="flex-direction:row;align-items:center;gap:6px;cursor:pointer">
+                    <input type="checkbox" id="gitGenerateKey" checked style="width:auto" />
+                    同时生成 SSH 密钥
+                  </label>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button id="btnGitSave" class="btn btn-primary">保存</button>
+                <button id="btnGitCancel" class="btn btn-ghost">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 子 Tab 2: SSH 密钥 -->
+        <div class="git-panel hidden" id="gitPanel2">
+          <div class="card">
+            <div class="card-head">
+              <h3>SSH 密钥</h3>
+              <span id="gitKeyAccount" class="hint">未选择账号</span>
+            </div>
+            <div class="fix-status" id="gitKeyInfo">在「账号管理」点账号的「SSH密钥」加载公钥</div>
+            <textarea id="gitPubKey" class="pubkey-box mono" readonly placeholder="公钥内容将显示在这里"></textarea>
+            <div class="card-actions" style="margin-top:10px;flex-wrap:wrap">
+              <button id="btnGitCopyPubKey" class="btn btn-ghost">复制公钥</button>
+              <button id="btnGitKeyUrl" class="btn btn-ghost">打开平台密钥页</button>
+              <button id="btnGitGenKey" class="btn btn-primary">生成 SSH 密钥</button>
+            </div>
+            <div class="install-path mono" id="gitCloneHint" style="margin-top:8px">公钥添加后即可 SSH clone</div>
+          </div>
+        </div>
+
+        <!-- 子 Tab 3: 身份切换 -->
+        <div class="git-panel hidden" id="gitPanel3">
+          <div class="card">
+            <div class="card-head">
+              <h3>身份切换</h3>
+              <span class="hint">按远程匹配账号</span>
+            </div>
+            <div class="fix-status">
+              <div>全局身份: <b id="gitGlobalIdentity">-</b></div>
+            </div>
+            <div class="card-actions" style="flex-wrap:wrap">
+              <button id="btnGitSwitchGlobal" class="btn btn-ghost">切换全局身份</button>
+            </div>
+            <div class="install-path mono" style="margin-top:8px">
+              <input id="gitLocalRepo" class="source-custom mono" placeholder="仓库目录（可选，用于本地身份）" />
+            </div>
+            <div class="card-actions" style="margin-top:8px">
+              <button id="btnGitSwitchLocal" class="btn btn-ghost">切换仓库级身份</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 子 Tab 4: 仓库同步 -->
+        <div class="git-panel hidden" id="gitPanel4">
+          <div class="card">
+            <div class="card-head">
+              <h3>仓库同步</h3>
+              <span class="hint">git pull --ff-only</span>
+            </div>
+            <div class="card-actions" style="flex-wrap:wrap">
+              <input id="gitRepoPath" class="source-custom mono" placeholder="仓库目录路径" />
+              <button id="btnGitPickRepo" class="btn btn-ghost">选择目录</button>
+            </div>
+            <div class="card-actions" style="margin-top:8px">
+              <button id="btnGitSyncRepo" class="btn btn-primary">同步仓库</button>
+            </div>
+            <div class="result-msg" id="gitSyncResult"></div>
+          </div>
+        </div>
+
       </section>
 
       <!-- 日志控制台 -->

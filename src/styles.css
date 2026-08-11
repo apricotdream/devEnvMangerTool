@@ -705,6 +705,23 @@ body {
 .secret-input input { flex: 1; min-width: 0; }
 .form-actions { display: flex; gap: 10px; margin-top: 4px; }
 
+/* SSH 公钥文本框：全宽、可纵向拉伸 */
+.pubkey-box {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 120px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+.pubkey-box:focus { outline: none; border-color: var(--accent); }
+
 /* ================= 响应式 ================= */
 @media (max-width: 900px) {
   .overview { grid-template-columns: repeat(2, 1fr); }
