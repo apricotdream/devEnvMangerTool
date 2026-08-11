@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="purple-dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EnvManager · 开发环境管理</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- ================= 左侧导航 ================= -->
+    <aside class="sidebar">
+      <div class="logo">
+        <div class="logo-mark">EM</div>
+        <div class="logo-text">
+          <strong>EnvManager</strong>
+          <span>开发环境管理</span>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-page="node">
+          <span class="nav-dot" style="--dot:#a78bfa"></span>
+          Node.js
+          <span class="nav-check">✓</span>
+        </button>
+        <button class="nav-item disabled" data-page="go">
+          <span class="nav-dot" style="--dot:#00acd7"></span>
+          Go
+          <span class="tag">即将支持</span>
+        </button>
+        <button class="nav-item disabled" data-page="python">
+          <span class="nav-dot" style="--dot:#ffd343"></span>
+          Python
+          <span class="tag">即将支持</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <span class="dot pulse"></span>
+        <span>v0.1.0</span>
+      </div>
+    </aside>
+
+    <!-- ================= 主内容 ================= -->
+    <main class="main">
+
+      <!-- 顶部栏 -->
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1>Node.js 环境</h1>
+          <p class="subtitle">检测 · 版本 · 镜像 · 登录</p>
+        </div>
+        <div class="topbar-actions">
+          <span id="healthPill" class="pill pill-neutral">● 待检测</span>
+          <button id="btnDetect" class="btn btn-ghost">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6" stroke-linecap="round"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" stroke-linecap="round"/></svg>
+            重新检测
+          </button>
+          <button id="btnTheme" class="theme-toggle" title="切换主题">
+            <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Tab 栏 -->
+      <nav class="tab-bar" id="tabBar">
+        <button class="tab-item active" data-tab="1">环境诊断</button>
+        <button class="tab-item" data-tab="2">镜像源</button>
+        <button class="tab-item" data-tab="3">Node 版本</button>
+        <button class="tab-item" data-tab="4">上传登录</button>
+      </nav>
+
+      <!-- Tab 1: 环境诊断 -->
+      <section class="tab-panel" id="tabPanel1">
+
+        <!-- 概览卡片 -->
+        <div class="cards overview">
+          <div class="card overview-item" id="cardInstall">
+            <div class="overview-label">安装状态</div>
+            <div class="overview-value"><span class="state-dot neutral"></span><span data-field="installed">待检测</span></div>
+          </div>
+          <div class="card overview-item" id="cardVersion">
+            <div class="overview-label">Node 版本</div>
+            <div class="overview-value mono" data-field="version">-</div>
+          </div>
+          <div class="card overview-item" id="cardNpm">
+            <div class="overview-label">npm 版本</div>
+            <div class="overview-value mono" data-field="npmVersion">-</div>
+          </div>
+          <div class="card overview-item" id="cardPath">
+            <div class="overview-label">PATH</div>
+            <div class="overview-value"><span class="state-dot neutral"></span><span data-field="path">待检测</span></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h3>网络连通性</h3>
+                <button id="btnReprobe" class="btn btn-mini">重新测速</button>
+              </div>
+              <div class="net-list" id="netList">
+                <div class="net-row">
+                  <div class="net-name"><span class="state-dot neutral"></span>官方 npm</div>
+                  <div class="net-latency mono">-</div>
+                </div>
+                <div class="net-row">
+                  <div class="net-name"><span class="state-dot neutral"></span>淘宝 npmmirror</div>
+                  <div class="net-latency mono">-</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h3>一键修复</h3>
+                <span id="fixHint" class="hint"></span>
+              </div>
+              <div class="fix-status" id="fixStatus"></div>
+              <div class="fix-actions">
+                <button id="btnInstall" class="btn btn-primary btn-block">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke-linecap="round"/></svg>
+                  安装 / 修复 Node
+                </button>
+                <button id="btnFixPath" class="btn btn-ghost btn-block">修复 PATH</button>
+              </div>
+              <div class="progress-area hidden" id="progressArea">
+                <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+                <div class="progress-meta">
+                  <span id="progressText">准备中…</span>
+                  <span id="progressPct" class="mono">0%</span>
+                </div>
+              </div>
+              <div class="install-path mono" id="installPath"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 2: 镜像源 -->
+      <section class="tab-panel hidden" id="tabPanel2">
+        <div class="card">
+          <div class="card-head">
+            <h3>npm 镜像源</h3>
+          </div>
+          <div class="registry-current">
+            <span class="label">当前 registry</span>
+            <code id="currentRegistry" class="mono">未设置</code>
+          </div>
+          <div class="source-options" id="sourceOptions">
+            <label class="source-option">
+              <input type="radio" name="source" value="https://registry.npmjs.org" />
+              <span class="source-name">官方 npm</span>
+              <span class="source-url mono">registry.npmjs.org</span>
+            </label>
+            <label class="source-option">
+              <input type="radio" name="source" value="https://registry.npmmirror.com" />
+              <span class="source-name">淘宝 npmmirror</span>
+              <span class="source-url mono">registry.npmmirror.com</span>
+            </label>
+            <label class="source-option">
+              <input type="radio" name="source" value="__custom__" />
+              <span class="source-name">自定义</span>
+              <input class="source-custom mono" id="customRegistry" type="text" placeholder="https://your-registry.com/" disabled />
+            </label>
+          </div>
+          <div class="card-actions">
+            <button id="btnTestRegistry" class="btn btn-ghost">测试连接</button>
+            <button id="btnApplyMirror" class="btn btn-primary">应用镜像</button>
+            <span id="testBadge" class="test-badge hidden"></span>
+          </div>
+          <div class="result-msg" id="mirrorResult"></div>
+        </div>
+      </section>
+
+      <!-- Tab 3: Node 版本 -->
+      <section class="tab-panel hidden" id="tabPanel3">
+        <div class="card">
+          <div class="card-head">
+            <h3>Node 版本管理</h3>
+            <div class="version-actions">
+              <span id="nvmBanner" class="nvm-banner hidden"></span>
+              <button id="btnUninstallNvm" class="btn btn-mini btn-danger hidden">卸载 nvm</button>
+              <button id="btnRefreshVersions" class="btn btn-mini btn-ghost">刷新</button>
+            </div>
+          </div>
+          <div class="version-meta">
+            <div class="version-meta-item">
+              <span class="label">当前版本</span>
+              <code id="currentVersion" class="mono">-</code>
+            </div>
+            <div class="version-meta-item">
+              <span class="label">安装目录</span>
+              <code id="installDir" class="mono">-</code>
+            </div>
+          </div>
+          <div class="version-sections">
+            <div class="version-section">
+              <div class="section-title">已安装版本</div>
+              <div id="installedList" class="version-list"></div>
+            </div>
+            <div class="version-section">
+              <div class="section-title">可用版本（npmmirror 源）</div>
+              <div id="availableList" class="version-list"></div>
+            </div>
+          </div>
+          <div class="progress-area hidden" id="versionProgressArea">
+            <div class="progress-track"><div class="progress-fill" id="versionProgressFill"></div></div>
+            <div class="progress-meta">
+              <span id="versionProgressText">准备中…</span>
+              <span id="versionProgressPct" class="mono">0%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 4: 上传登录 -->
+      <section class="tab-panel hidden" id="tabPanel4">
+        <div class="card">
+          <div class="card-head">
+            <h3>上传登录配置</h3>
+            <button id="btnAddAccount" class="btn btn-mini btn-primary">+ 新增账号</button>
+          </div>
+          <div id="accountList" class="account-list">
+            <div class="empty">暂无账号，点击右上角「新增账号」</div>
+          </div>
+
+          <div id="accountForm" class="account-form hidden">
+            <input type="hidden" id="accId" />
+            <div class="form-row">
+              <div class="form-field">
+                <label>账号名称</label>
+                <input id="accName" type="text" placeholder="如: 公司 Nexus" />
+              </div>
+              <div class="form-field">
+                <label>Registry 地址</label>
+                <input id="accRegistry" type="text" placeholder="https://192.168.3.8:8980/repository/npm-group/" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-field">
+                <label>认证类型</label>
+                <select id="accAuthType">
+                  <option value="token">Token</option>
+                  <option value="basic">用户名 + 密码</option>
+                </select>
+              </div>
+              <div class="form-field" id="tokenField">
+                <label>Token</label>
+                <div class="secret-input">
+                  <input id="accToken" type="password" placeholder="npm token" />
+                  <button id="btnToggleToken" class="btn btn-mini btn-ghost" type="button">显示</button>
+                </div>
+              </div>
+              <div class="form-field hidden" id="basicFields">
+                <div class="form-field">
+                  <label>用户名</label>
+                  <input id="accUser" type="text" />
+                </div>
+                <div class="form-field">
+                  <label>密码</label>
+                  <input id="accPass" type="password" />
+                </div>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button id="btnSaveAccount" class="btn btn-primary">保存</button>
+              <button id="btnCancelAccount" class="btn btn-ghost">取消</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 日志控制台 -->
+      <section class="card console-card">
+        <div class="card-head">
+          <h3>控制台</h3>
+          <div class="console-actions">
+            <span id="envTag" class="tag tag-info">模拟数据</span>
+            <button id="btnClearLog" class="btn btn-mini">清空</button>
+          </div>
+        </div>
+        <div class="console mono" id="console"></div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ================= 确认弹窗 ================= -->
+  <div class="modal-backdrop hidden" id="modalBackdrop">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-title" id="modalTitle">确认操作</div>
+      <div class="modal-body mono" id="modalBody"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="modalCancel">取消</button>
+        <button class="btn btn-danger" id="modalConfirm">确认执行</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="backend.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

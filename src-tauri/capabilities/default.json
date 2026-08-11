@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "默认能力：主窗口基础权限",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

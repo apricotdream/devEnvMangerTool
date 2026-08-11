@@ -1,0 +1,37 @@
+# ============ 构建产物 ============
+# Rust/Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Node（若后续引入构建工具）
+node_modules/
+dist/
+
+# ============ 日志 ============
+*.log
+
+# ============ IDE ============
+.idea/
+.vscode/
+*.swp
+
+# ============ AI 工具（Claude Code） ============
+# 配置/记忆目录 + 项目级 AI 指令
+.claude/
+CLAUDE.md
+
+# ============ AI 生成的临时文件 ============
+*.tmp
+*.bak
+__pycache__/
+*.pyc
+
+# ============ 临时/测试产物 ============
+preview.png
+preview.jpg
+dom_dump*.html
+*.test
+
+# ============ 系统 ============
+Thumbs.db
+.DS_Store
