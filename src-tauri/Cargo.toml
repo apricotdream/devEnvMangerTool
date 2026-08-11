@@ -19,6 +19,11 @@ thiserror = "2"
 dirs = "6"
 chrono = "0.4"
 indexmap = { version = "2", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "devenv"
+path = "src/bin/devenv.rs"
 
 [profile.release]
 strip = true

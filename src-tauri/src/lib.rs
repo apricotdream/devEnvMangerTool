@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 mod git_cmds;
-mod gitcore;
+pub mod gitcore;
 
 // ---------------------------------------------------------------------------
 // 数据结构（字段名对齐前端 camelCase）
@@ -17,32 +17,32 @@ mod gitcore;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct NetworkProbe {
-    name: String,
-    url: String,
-    ok: bool,
-    latency_ms: Option<u64>,
-    error: Option<String>,
+pub struct NetworkProbe {
+    pub name: String,
+    pub url: String,
+    pub ok: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
-struct NodeEnvInfo {
-    installed: bool,
-    store_stub: bool,
-    real_node_exe: Option<String>,
-    node_version: Option<String>,
-    npm_version: Option<String>,
-    in_path: bool,
-    node_dir_in_path: Option<String>,
-    network: Vec<NetworkProbe>,
+pub struct NodeEnvInfo {
+    pub installed: bool,
+    pub store_stub: bool,
+    pub real_node_exe: Option<String>,
+    pub node_version: Option<String>,
+    pub npm_version: Option<String>,
+    pub in_path: bool,
+    pub node_dir_in_path: Option<String>,
+    pub network: Vec<NetworkProbe>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RegistryResult {
-    ok: bool,
-    path: String,
+pub struct RegistryResult {
+    pub ok: bool,
+    pub path: String,
 }
 
 #[derive(Serialize)]
@@ -62,65 +62,65 @@ struct InstallResult {
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct RegistryTestResult {
-    reachable: bool,
-    status: Option<u16>,
-    latency_ms: Option<u64>,
-    throughput_kbs: Option<f64>,
-    needs_auth: bool,
-    auth_user: Option<String>,
-    error: Option<String>,
+pub struct RegistryTestResult {
+    pub reachable: bool,
+    pub status: Option<u16>,
+    pub latency_ms: Option<u64>,
+    pub throughput_kbs: Option<f64>,
+    pub needs_auth: bool,
+    pub auth_user: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct Account {
-    id: String,
-    name: String,
-    registry: String,
+pub struct Account {
+    pub id: String,
+    pub name: String,
+    pub registry: String,
     #[serde(default)]
-    auth_type: String,
+    pub auth_type: String,
     #[serde(default)]
-    token: Option<String>,
+    pub token: Option<String>,
     #[serde(default)]
-    username: Option<String>,
+    pub username: Option<String>,
     #[serde(default)]
-    password: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct AccountsFile {
+pub struct AccountsFile {
     #[serde(default)]
-    active: Option<String>,
+    pub active: Option<String>,
     #[serde(default)]
-    accounts: Vec<Account>,
+    pub accounts: Vec<Account>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InstalledVersion {
-    version: String,
-    current: bool,
-    size_mb: Option<u64>,
+pub struct InstalledVersion {
+    pub version: String,
+    pub current: bool,
+    pub size_mb: Option<u64>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VersionsInfo {
-    nvm_detected: bool,
-    install_dir: String,
-    installed: Vec<InstalledVersion>,
-    available: Vec<String>,
-    current: Option<String>,
+pub struct VersionsInfo {
+    pub nvm_detected: bool,
+    pub install_dir: String,
+    pub installed: Vec<InstalledVersion>,
+    pub available: Vec<String>,
+    pub current: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NvmInfo {
-    detected: bool,
-    dirs: Vec<String>,
-    path_entries: Vec<String>,
+pub struct NvmInfo {
+    pub detected: bool,
+    pub dirs: Vec<String>,
+    pub path_entries: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ fn is_zero_byte_stub(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn user_npmrc_path() -> String {
+pub fn user_npmrc_path() -> String {
     if let Ok(p) = std::env::var("NPM_CONFIG_USERCONFIG") {
         return p;
     }
@@ -214,7 +214,7 @@ fn probe(name: &str, url: &str) -> NetworkProbe {
 }
 
 /// 从 npmmirror 二进制目录索引中解析最新 LTS（偶数主版本）。
-fn latest_lts(html: &str) -> Option<String> {
+pub fn latest_lts(html: &str) -> Option<String> {
     let re = regex::Regex::new(r"v(\d+)\.(\d+)\.(\d+)/").ok()?;
     let mut versions: Vec<(i32, i32, i32)> = Vec::new();
     for cap in re.captures_iter(html) {
@@ -306,7 +306,7 @@ fn probe_registry_endpoint(registry_base: &str, auth_args: &[&str]) -> RegistryT
 }
 
 /// 下载并解压指定版本的 Node 到 install root，emit 阶段回调。
-fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
+pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
     let binary_mirror = "https://registry.npmmirror.com/-/binary/node";
     let local = std::env::var("LOCALAPPDATA").map_err(|_| "缺少 LOCALAPPDATA".to_string())?;
     let parent = format!("{}\\Programs\\nodejs", local);
@@ -462,7 +462,7 @@ fn write_npmrc_credential(account: &Account) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// 读取注册表中的 PATH（机器级 + 用户级，合并去重），不依赖过期的进程环境。
-fn get_registry_path_entries() -> Vec<String> {
+pub fn get_registry_path_entries() -> Vec<String> {
     let mut entries: Vec<String> = Vec::new();
     for level in ["Machine", "User"] {
         let ps = format!("[Environment]::GetEnvironmentVariable('Path','{}')", level);
@@ -477,7 +477,7 @@ fn get_registry_path_entries() -> Vec<String> {
     entries
 }
 
-fn detect_nvm() -> bool {
+pub fn detect_nvm() -> bool {
     let appdata = std::env::var("APPDATA").unwrap_or_default();
     for d in [format!("{}\\nvm", appdata), format!("{}\\nvm-windows", appdata)] {
         if Path::new(&d).exists() {
@@ -499,7 +499,7 @@ fn detect_nvm() -> bool {
     false
 }
 
-fn current_version_from_path() -> Option<String> {
+pub fn current_version_from_path() -> Option<String> {
     let root_str = node_install_root();
     let root = Path::new(&root_str);
     for dir in get_registry_path_entries() {
@@ -1111,6 +1111,39 @@ fn uninstall_version(version: String) -> Result<String, String> {
     }
     std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
     Ok(target)
+}
+
+// ---------------------------------------------------------------------------
+// CLI API（无 GUI 版本复用，不含 #[tauri::command] 宏）
+// ---------------------------------------------------------------------------
+
+pub mod api {
+    use crate::{NodeEnvInfo, RegistryResult, VersionsInfo};
+
+    pub fn detect_node() -> NodeEnvInfo {
+        crate::detect_node()
+    }
+    pub fn read_registry() -> Result<Option<String>, String> {
+        crate::read_registry()
+    }
+    pub fn set_registry(url: String) -> Result<RegistryResult, String> {
+        crate::set_registry(url)
+    }
+    pub fn list_versions() -> VersionsInfo {
+        crate::list_versions()
+    }
+    pub fn switch_version(version: String) -> Result<String, String> {
+        crate::switch_version(version)
+    }
+    pub fn uninstall_version(version: String) -> Result<String, String> {
+        crate::uninstall_version(version)
+    }
+    pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
+        crate::install_specific(version, emit)
+    }
+    pub fn detect_nvm() -> bool {
+        crate::detect_nvm()
+    }
 }
 
 // ---------------------------------------------------------------------------
