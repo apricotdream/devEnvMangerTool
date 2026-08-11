@@ -1,6 +1,9 @@
 {
   "identifier": "default",
-  "description": "默认能力：主窗口基础权限",
+  "description": "默认能力：核心 + 对话框 + 外部打开",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
 }
