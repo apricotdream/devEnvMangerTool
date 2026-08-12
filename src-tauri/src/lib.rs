@@ -70,6 +70,9 @@ pub struct RegistryTestResult {
     pub needs_auth: bool,
     pub auth_user: Option<String>,
     pub error: Option<String>,
+    /// 连接失败源于证书不受信任（自签/私有CA），前端应提示用户是否信任。
+    #[serde(default)]
+    pub cert_issue: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -86,6 +89,9 @@ pub struct Account {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// 凭据作用域：None = 全局 ~/.npmrc；Some(项目目录) = 写入该项目的 .npmrc
+    #[serde(default)]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -139,6 +145,17 @@ fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
         }
     } else {
         Some(stdout)
+    }
+}
+
+/// 同时返回 stdout 与 stderr（探测需要区分「请求结果」与「证书/连接错误」）。
+fn run_cmd_both(program: &str, args: &[&str]) -> (String, String) {
+    match Command::new(program).args(args).output() {
+        Ok(out) => (
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ),
+        Err(e) => (String::new(), e.to_string()),
     }
 }
 
@@ -231,27 +248,41 @@ pub fn latest_lts(html: &str) -> Option<String> {
         .map(|(m, min, p)| format!("{}.{}.{}", m, min, p))
 }
 
-/// 单次 curl 探测，返回 (HTTP状态, 延迟ms, 吞吐KB/s)。
-fn probe_curl(endpoint: &str, auth_args: &[&str]) -> (u16, Option<u64>, Option<f64>) {
-    let mut args: Vec<&str> = vec![
-        "-s",
-        "-k", // 忽略自签名 HTTPS 证书（私有源常见）
-        "-o",
-        "NUL",
-        "-w",
-        "%{http_code} %{time_total} %{size_download}",
-        "-L",
-        "-m",
-        "10",
+struct CurlProbe {
+    status: u16,
+    latency_ms: Option<u64>,
+    throughput_kbs: Option<f64>,
+    error: Option<String>,
+}
+
+/// 单次 curl 探测。
+/// TLS 信任策略：已通过指纹锚定信任的 host 使用 `--cacert <pem>`（锚定验证）；
+/// 未信任的 https host 不再无脑 `-k`，自签/私有CA 会在此报错，交由上层判定并提示。
+fn probe_curl(endpoint: &str, auth_args: &[&str]) -> CurlProbe {
+    let mut args: Vec<String> = vec![
+        "-sS".into(), // 静默进度，但保留错误输出到 stderr（证书/连接错误需靠它判定）
+        "-o".into(),
+        "NUL".into(),
+        "-w".into(),
+        "%{http_code} %{time_total} %{size_download}".into(),
+        "-L".into(),
+        "-m".into(),
+        "10".into(),
     ];
-    args.extend_from_slice(auth_args);
-    args.push(endpoint);
-    let out = run_cmd("curl.exe", &args);
-    match out {
-        Some(s) => {
-            let parts: Vec<&str> = s.trim().split_whitespace().collect();
-            if parts.len() >= 3 {
-                let status = parts[0].parse::<u16>().unwrap_or(0);
+    if let Some((host, port)) = url_host_port(endpoint) {
+        if let Some(pem) = host_pem_path(&host, port) {
+            args.push("--cacert".into());
+            args.push(pem);
+        }
+    }
+    args.extend(auth_args.iter().map(|s| s.to_string()));
+    args.push(endpoint.to_string());
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let (stdout, stderr) = run_cmd_both("curl.exe", &arg_refs);
+    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    if parts.len() >= 3 {
+        if let Ok(status) = parts[0].parse::<u16>() {
+            if status > 0 {
                 let time = parts[1].parse::<f64>().unwrap_or(0.0);
                 let bytes = parts[2].parse::<f64>().unwrap_or(0.0);
                 let throughput = if time > 0.0 && bytes > 0.0 {
@@ -259,12 +290,28 @@ fn probe_curl(endpoint: &str, auth_args: &[&str]) -> (u16, Option<u64>, Option<f
                 } else {
                     None
                 };
-                (status, Some((time * 1000.0) as u64), throughput)
-            } else {
-                (0, None, None)
+                return CurlProbe {
+                    status,
+                    latency_ms: Some((time * 1000.0) as u64),
+                    throughput_kbs: throughput,
+                    error: None,
+                };
             }
         }
-        None => (0, None, None),
+    }
+    // 失败：优先取 stderr（证书/连接错误），其次 stdout
+    let err = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "curl 执行失败".to_string()
+    };
+    CurlProbe {
+        status: 0,
+        latency_ms: None,
+        throughput_kbs: None,
+        error: Some(err),
     }
 }
 
@@ -274,38 +321,191 @@ fn probe_curl(endpoint: &str, auth_args: &[&str]) -> (u16, Option<u64>, Option<f
 fn probe_registry_endpoint(registry_base: &str, auth_args: &[&str]) -> RegistryTestResult {
     let mut result = RegistryTestResult::default();
 
-    let (ping_status, ping_latency, _) = probe_curl(&format!("{}/-/ping", registry_base), auth_args);
-    if ping_status == 0 {
+    let ping = probe_curl(&format!("{}/-/ping", registry_base), auth_args);
+    if ping.status == 0 {
         result.reachable = false;
-        result.error = Some("连接失败（无法建立连接或超时）".to_string());
+        if let Some(e) = &ping.error {
+            if is_cert_error(e) {
+                result.error = Some("证书不受信任（自签/私有CA）".to_string());
+                result.cert_issue = true;
+            } else {
+                result.error = Some(format!("连接失败：{}", e));
+            }
+        } else {
+            result.error = Some("连接失败（无法建立连接或超时）".to_string());
+        }
         return result;
     }
-    if ping_status == 401 || ping_status == 403 {
+    if ping.status == 401 || ping.status == 403 {
         result.reachable = true;
         result.needs_auth = true;
-        result.error = Some(format!("HTTP {} 需要认证", ping_status));
+        result.error = Some(format!("HTTP {} 需要认证", ping.status));
         return result;
     }
-    if !(200..400).contains(&ping_status) {
+    if !(200..400).contains(&ping.status) {
         result.reachable = false;
-        result.error = Some(format!("HTTP {} 异常", ping_status));
+        result.error = Some(format!("HTTP {} 异常", ping.status));
         return result;
     }
     result.reachable = true;
-    result.status = Some(ping_status);
-    result.latency_ms = ping_latency;
+    result.status = Some(ping.status);
+    result.latency_ms = ping.latency_ms;
 
     // 次要探测：真实拉包（吞吐/认证），404 不视为不可达
-    let (pkg_status, _, pkg_throughput) = probe_curl(&format!("{}/debug", registry_base), auth_args);
-    match pkg_status {
-        200..=399 => result.throughput_kbs = pkg_throughput,
+    let pkg = probe_curl(&format!("{}/debug", registry_base), auth_args);
+    match pkg.status {
+        200..=399 => result.throughput_kbs = pkg.throughput_kbs,
         401 | 403 => result.needs_auth = true,
         _ => { /* 源正常但无该包，忽略 */ }
     }
     result
 }
 
-/// 下载并解压指定版本的 Node 到 install root，emit 阶段回调。
+// ---------------------------------------------------------------------------
+// 证书信任（自签/私有CA → 指纹锚定，TOFU 知情信任）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CertInfo {
+    pub host: String,
+    pub port: u16,
+    pub subject: Option<String>,
+    pub issuer: Option<String>,
+    pub self_signed: bool,
+    pub sha256: Option<String>,
+    pub pem: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedCert {
+    pub host: String,
+    pub port: u16,
+    pub sha256: String,
+    pub pem_path: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedCertsFile {
+    #[serde(default)]
+    pub certs: Vec<TrustedCert>,
+}
+
+fn certs_dir() -> String {
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    format!("{}\\DevEnvManager\\certs", appdata)
+}
+
+fn trusted_certs_path() -> String {
+    format!("{}\\trusted.json", certs_dir())
+}
+
+fn read_trusted_certs() -> TrustedCertsFile {
+    std::fs::read_to_string(trusted_certs_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_trusted_certs(file: &TrustedCertsFile) -> Result<(), String> {
+    let dir = certs_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
+    std::fs::write(trusted_certs_path(), json).map_err(|e| e.to_string())
+}
+
+/// 从 registry 地址解析出 (host, port)，https 默认 443 / http 默认 80。
+fn url_host_port(url: &str) -> Option<(String, u16)> {
+    let u = url.trim();
+    let rest = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    match authority.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.parse::<u16>().is_ok() => {
+            Some((h.to_string(), p.parse().unwrap()))
+        }
+        _ => {
+            let default = if u.starts_with("https://") { 443 } else { 80 };
+            Some((authority.to_string(), default))
+        }
+    }
+}
+
+fn host_pem_path(host: &str, port: u16) -> Option<String> {
+    read_trusted_certs().certs.into_iter().find_map(|c| {
+        if c.host.eq_ignore_ascii_case(host) && c.port == port {
+            Some(c.pem_path)
+        } else {
+            None
+        }
+    })
+}
+
+/// 用 PowerShell + SslStream 抓取远端证书（忽略校验），返回主体/签发者/SHA-256/PEM。
+/// 纯 Windows 自带组件，无需额外依赖。
+fn fetch_cert_info(registry: &str) -> Result<CertInfo, String> {
+    let (host, port) = url_host_port(registry).ok_or_else(|| "无法解析 registry 地址".to_string())?;
+    let script = format!(
+        "$h='{}';$p={};$tcp=New-Object System.Net.Sockets.TcpClient($h,$p);$cb=[System.Net.Security.RemoteCertificateValidationCallback]{{$true}};$ssl=New-Object System.Net.Security.SslStream($tcp.GetStream(),$false,$cb);$ssl.AuthenticateAsClient($h);$c=New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate);$sha=($c.GetCertHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)|ForEach-Object{{$_.ToString('x2')}}) -join '';$b64=[Convert]::ToBase64String($c.RawData);$lines=$b64 -split '(.{{64}})'|Where-Object{{$_}};$pem=@('-----BEGIN CERTIFICATE-----')+$lines+@('-----END CERTIFICATE-----') -join \"`n\";$ssl.Close();$tcp.Close();[PSCustomObject]@{{host=$h;port=$p;subject=$c.Subject;issuer=$c.Issuer;selfSigned=($c.Subject -eq $c.Issuer);sha256=$sha;pem=$pem}}|ConvertTo-Json -Compress",
+        host, port
+    );
+    let out = run_cmd("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &script])
+        .ok_or_else(|| "无法启动 PowerShell 抓取证书".to_string())?;
+    let v: serde_json::Value =
+        serde_json::from_str(out.trim()).map_err(|e| format!("解析证书信息失败: {}", e))?;
+    Ok(CertInfo {
+        host: host.clone(),
+        port,
+        subject: v["subject"].as_str().map(|s| s.to_string()),
+        issuer: v["issuer"].as_str().map(|s| s.to_string()),
+        self_signed: v["selfSigned"].as_bool().unwrap_or(false),
+        sha256: v["sha256"].as_str().map(|s| s.to_string()),
+        pem: v["pem"].as_str().map(|s| s.to_string()),
+        error: None,
+    })
+}
+
+/// 合并所有受信证书为 all.pem，并 setx NODE_EXTRA_CA_CERTS（供 npm/Node 追加信任）。
+/// best-effort：失败不阻断接受流程。
+fn sync_node_extra_ca(tf: &TrustedCertsFile) -> Result<(), String> {
+    let dir = certs_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut merged = String::new();
+    for c in &tf.certs {
+        if let Ok(pem) = std::fs::read_to_string(&c.pem_path) {
+            let t = pem.trim();
+            if !t.is_empty() {
+                merged.push_str(t);
+                merged.push_str("\n\n");
+            }
+        }
+    }
+    // 始终写 all.pem（空文件也写，避免 NODE_EXTRA_CA_CERTS 指向不存在的路径导致 Node 启动报错）
+    let all_path = format!("{}\\all.pem", dir);
+    std::fs::write(&all_path, merged).map_err(|e| e.to_string())?;
+    let _ = run_cmd("setx.exe", &["NODE_EXTRA_CA_CERTS", all_path.as_str()]);
+    Ok(())
+}
+
+/// 判断 curl 报错文本是否源于证书不受信任。
+fn is_cert_error(s: &str) -> bool {
+    let l = s.to_lowercase();
+    l.contains("untrusted_root")
+        || l.contains("certificate verify")
+        || l.contains("self-signed")
+        || l.contains("ssl certificate problem")
+        || l.contains("unable to get local issuer")
+        || l.contains("unable to verify the first certificate")
+}
+
+// ---------------------------------------------------------------------------
+// 下载并解压指定版本的 Node 到 install root，emit 阶段回调。
+// ---------------------------------------------------------------------------
 pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
     let binary_mirror = "https://registry.npmmirror.com/-/binary/node";
     let local = std::env::var("LOCALAPPDATA").map_err(|_| "缺少 LOCALAPPDATA".to_string())?;
@@ -376,12 +576,76 @@ fn npmrc_key(registry: &str) -> String {
     format!("//{}", with_slash)
 }
 
-/// 用账号凭据对目标 registry 执行 npm whoami，验证发布认证。
-/// 返回用户名（成功）或 None（失败）。通过临时 .npmrc 隔离，不改用户配置。
+/// 用账号凭据对目标 registry 调用 `GET /-/whoami`，验证发布认证。
+/// 返回用户名（成功）或 None（失败）。纯 curl 实现，不依赖 npm 是否安装。
+/// npm 官方 whoami 即请求该端点，返回 `{"username":"..."}`。
 fn check_whoami(account: &Account) -> Option<String> {
-    let temp_npmrc = std::env::temp_dir().join(format!("envmanager-whoami-{}.npmrc", account.id));
+    let mut u = account.registry.trim().to_string();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        u = format!("http://{}", u);
+    }
+    while u.ends_with('/') {
+        u.pop();
+    }
+    let whoami_url = format!("{}/-/whoami", u);
+
+    let mut auth_args: Vec<String> = vec![
+        "-sS".to_string(),
+        "-m".to_string(),
+        "10".to_string(),
+        "-w".to_string(),
+        "\n%{http_code}".to_string(),
+    ];
+    // 已指纹锚定信任的自签/私有CA host：用 --cacert 锚定验证，避免 whoami 因证书失败
+    if let Some((host, port)) = url_host_port(&u) {
+        if let Some(pem) = host_pem_path(&host, port) {
+            auth_args.push("--cacert".to_string());
+            auth_args.push(pem);
+        }
+    }
+    match account.auth_type.as_str() {
+        "basic" => {
+            let cred = format!(
+                "{}:{}",
+                account.username.as_deref().unwrap_or(""),
+                account.password.as_deref().unwrap_or("")
+            );
+            let b64 = base64::engine::general_purpose::STANDARD.encode(cred.as_bytes());
+            auth_args.push("-H".to_string());
+            auth_args.push(format!("Authorization: Basic {}", b64));
+        }
+        _ => {
+            auth_args.push("-H".to_string());
+            auth_args.push(format!(
+                "Authorization: Bearer {}",
+                account.token.as_deref().unwrap_or("")
+            ));
+        }
+    }
+    auth_args.push(whoami_url);
+    let arg_refs: Vec<&str> = auth_args.iter().map(|s| s.as_str()).collect();
+
+    let out = run_cmd("curl.exe", &arg_refs)?;
+    // 输出 = 响应体 + "\n" + http_code
+    let (body, code) = out.rsplit_once('\n')?;
+    if code.trim() != "200" {
+        return None;
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    // 标准返回 {"username":"xxx"}；个别源可能直接返回用户名文本
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("username").and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .or_else(|| Some(body.to_string()))
+}
+
+/// 生成账号的 .npmrc 凭据行，如 `//host:port/path/:_authToken=...`。
+fn credential_line(account: &Account) -> String {
     let key = npmrc_key(&account.registry);
-    let line = match account.auth_type.as_str() {
+    match account.auth_type.as_str() {
         "basic" => {
             let cred = format!(
                 "{}:{}",
@@ -396,65 +660,88 @@ fn check_whoami(account: &Account) -> Option<String> {
             key,
             account.token.as_deref().unwrap_or("")
         ),
-    };
-    let _ = std::fs::write(&temp_npmrc, format!("registry={}\n{}\n", account.registry, line));
-
-    let out = Command::new("cmd")
-        .args([
-            "/d",
-            "/c",
-            "npm.cmd",
-            "whoami",
-            "--registry",
-            account.registry.as_str(),
-        ])
-        .env("NPM_CONFIG_USERCONFIG", &temp_npmrc)
-        .output();
-
-    let _ = std::fs::remove_file(&temp_npmrc);
-
-    match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
-        }
-        _ => None,
     }
 }
 
-/// 把账号凭据写入全局 .npmrc（自动备份 .bak）。
+/// 账号凭据应写入/读取的 .npmrc 路径：项目级账号写项目文件，否则写全局。
+fn npmrc_path_for(account: &Account) -> String {
+    match account.project_dir.as_deref() {
+        Some(dir) if !dir.trim().is_empty() => format!("{}\\{}", dir.trim_end_matches('\\'), ".npmrc"),
+        _ => user_npmrc_path(),
+    }
+}
+
+/// 把账号凭据写入 .npmrc（自动备份 .bak）。
+/// - 全局账号：只写凭据行，不动 `registry=`（避免污染所有项目的下载源）。
+/// - 项目账号：同时把 `registry=` 设为该账号 registry，项目内完整切换。
 fn write_npmrc_credential(account: &Account) -> Result<(), String> {
-    let path = user_npmrc_path();
+    let path = npmrc_path_for(account);
+    if let Some(dir) = account.project_dir.as_deref() {
+        if !dir.trim().is_empty() && !Path::new(dir).is_dir() {
+            return Err(format!("项目目录不存在: {}", dir));
+        }
+    }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::copy(&path, format!("{}.bak", path));
 
-    let key = npmrc_key(&account.registry);
-    let line = match account.auth_type.as_str() {
-        "basic" => {
-            let cred = format!(
-                "{}:{}",
-                account.username.as_deref().unwrap_or(""),
-                account.password.as_deref().unwrap_or("")
-            );
-            let b64 = base64::engine::general_purpose::STANDARD.encode(cred.as_bytes());
-            format!("{}:_auth={}", key, b64)
-        }
-        _ => format!(
-            "{}:_authToken={}",
-            key,
-            account.token.as_deref().unwrap_or("")
-        ),
-    };
-
     let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
-    let prefix = format!("{}:", key);
+
+    // 项目级：确保 registry=<account.registry>
+    if account.project_dir.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+        let reg_line = format!("registry={}", account.registry);
+        let mut found = false;
+        for l in lines.iter_mut() {
+            if l.trim_start().starts_with("registry=") {
+                *l = reg_line.clone();
+                found = true;
+            }
+        }
+        if !found {
+            lines.push(reg_line);
+        }
+    }
+
+    // 替换同 registry key 的旧凭据行，再写入新凭据
+    let line = credential_line(account);
+    let prefix = format!("{}:", npmrc_key(&account.registry));
     lines.retain(|l| !l.trim_start().starts_with(&prefix));
     lines.push(line);
     std::fs::write(&path, lines.join("\n") + "\n").map_err(|e| e.to_string())
+}
+
+/// 从 .npmrc 中移除账号凭据（删除账号时清理残留）。
+/// 全局文件移除凭据行；项目文件额外移除 `registry=`（若等于该账号 registry）。
+/// 兼容历史遗留：项目级账号也会顺带清理全局文件中的同名凭据行。
+fn remove_npmrc_credential(account: &Account) -> Result<(), String> {
+    let mut targets = vec![(user_npmrc_path(), false)];
+    if let Some(dir) = account.project_dir.as_deref() {
+        if !dir.trim().is_empty() {
+            targets.push((npmrc_path_for(account), true));
+        }
+    }
+    for (path, remove_registry) in targets {
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue, // 文件不存在视为已清理
+        };
+        let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
+        let before = lines.len();
+        let line = credential_line(account);
+        lines.retain(|l| l.trim() != line.trim());
+        if remove_registry {
+            let reg_line = format!("registry={}", account.registry);
+            lines.retain(|l| l.trim() != reg_line);
+        }
+        if lines.len() != before {
+            let content = if lines.is_empty() {
+                String::new()
+            } else {
+                lines.join("\n") + "\n"
+            };
+            std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +1056,366 @@ fn test_registry(url: String) -> RegistryTestResult {
     probe_registry_endpoint(&u, &[])
 }
 
+// ---------------------------------------------------------------------------
+// Tauri 命令：证书信任
+// ---------------------------------------------------------------------------
+
+/// 抓取指定 registry 的证书信息（用于「证书不受信任」提示弹窗）。
+#[tauri::command]
+fn probe_cert(registry: String) -> Result<CertInfo, String> {
+    fetch_cert_info(&registry)
+}
+
+/// 接受并信任指定 registry 的证书：落盘 PEM + 记录指纹 + 合并 NODE_EXTRA_CA_CERTS。
+#[tauri::command]
+fn accept_cert(registry: String) -> Result<CertInfo, String> {
+    let info = fetch_cert_info(&registry)?;
+    let sha = info.sha256.clone().ok_or_else(|| "未获取到证书指纹".to_string())?;
+    let pem = info.pem.clone().ok_or_else(|| "未获取到证书内容".to_string())?;
+
+    let dir = certs_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let pem_path = format!("{}\\{}_{}.pem", dir, info.host, info.port);
+    std::fs::write(&pem_path, &pem).map_err(|e| e.to_string())?;
+
+    let mut tf = read_trusted_certs();
+    tf.certs.retain(|c| !(c.host.eq_ignore_ascii_case(&info.host) && c.port == info.port));
+    tf.certs.push(TrustedCert {
+        host: info.host.clone(),
+        port: info.port,
+        sha256: sha,
+        pem_path: pem_path.clone(),
+    });
+    write_trusted_certs(&tf)?;
+
+    // npm/Node 侧：合并 all.pem + setx（best-effort）
+    let _ = sync_node_extra_ca(&tf);
+    Ok(info)
+}
+
+#[tauri::command]
+fn list_trusted_certs() -> TrustedCertsFile {
+    read_trusted_certs()
+}
+
+#[tauri::command]
+fn remove_trusted_cert(host: String, port: u16) -> Result<TrustedCertsFile, String> {
+    let mut tf = read_trusted_certs();
+    let removed: Vec<TrustedCert> = tf
+        .certs
+        .iter()
+        .filter(|c| c.host.eq_ignore_ascii_case(&host) && c.port == port)
+        .cloned()
+        .collect();
+    tf.certs.retain(|c| !(c.host.eq_ignore_ascii_case(&host) && c.port == port));
+    write_trusted_certs(&tf)?;
+    for c in &removed {
+        let _ = std::fs::remove_file(&c.pem_path);
+    }
+    let _ = sync_node_extra_ca(&tf);
+    Ok(tf)
+}
+
+// ---------------------------------------------------------------------------
+// Tauri 命令：包发布工作流（workspace 扫描 / 撞车预检 / npm publish）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPackage {
+    pub name: String,
+    pub version: String,
+    pub dir: String,
+    pub has_dist: bool,
+    pub is_private: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryPackageCheck {
+    pub exists: bool,
+    pub versions: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishResult {
+    pub name: String,
+    pub version: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeCaInfo {
+    pub all_pem_exists: bool,
+    pub env_set: bool,
+    pub env_matches: bool,
+}
+
+/// 扫描 `packages/*` 与 `packages/*/*` 下的可发布包（跳过 node_modules / extension）。
+fn find_package_jsons(root: &str) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let packages_dir = Path::new(root).join("packages");
+    let Ok(entries) = std::fs::read_dir(&packages_dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        // depth 1: packages/*/package.json
+        let pj1 = p.join("package.json");
+        if pj1.exists() {
+            out.push(pj1);
+        }
+        // depth 2: packages/*/*/package.json
+        if let Ok(subs) = std::fs::read_dir(&p) {
+            for se in subs.flatten() {
+                let sp = se.path();
+                if sp.is_dir()
+                    && se.file_name() != "node_modules"
+                    && se.file_name() != "extension"
+                {
+                    let pj2 = sp.join("package.json");
+                    if pj2.exists() {
+                        out.push(pj2);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[tauri::command]
+fn list_publish_packages(project_dir: String) -> Result<Vec<PublishPackage>, String> {
+    let root = Path::new(&project_dir);
+    if !root.is_dir() {
+        return Err("项目目录不存在".to_string());
+    }
+    let mut pkgs = Vec::new();
+    for pj in find_package_jsons(&project_dir) {
+        let Ok(content) = std::fs::read_to_string(&pj) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let name = v["name"].as_str().unwrap_or("").to_string();
+        let version = v["version"].as_str().unwrap_or("").to_string();
+        if name.is_empty() || version.is_empty() {
+            continue;
+        }
+        let dir = pj
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let has_dist = Path::new(&dir).join("dist").is_dir();
+        let is_private = v["private"].as_bool().unwrap_or(false);
+        pkgs.push(PublishPackage {
+            name,
+            version,
+            dir,
+            has_dist,
+            is_private,
+        });
+    }
+    Ok(pkgs)
+}
+
+/// 检查某个包在 registry 上是否已存在（版本撞车预检）。
+#[tauri::command]
+fn check_registry_package(registry: String, name: String) -> RegistryPackageCheck {
+    let mut u = registry.trim().to_string();
+    while u.ends_with('/') {
+        u.pop();
+    }
+    let url = format!("{}/{}", u, name);
+    let mut args: Vec<String> = vec![
+        "-sS".into(),
+        "-m".into(),
+        "10".into(),
+        "-w".into(),
+        "\n%{http_code}".into(),
+    ];
+    if let Some((host, port)) = url_host_port(&u) {
+        if let Some(pem) = host_pem_path(&host, port) {
+            args.push("--cacert".into());
+            args.push(pem);
+        }
+    }
+    args.push(url);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let (stdout, _stderr) = run_cmd_both("curl.exe", &arg_refs);
+    let (body, code) = stdout.rsplit_once('\n').unwrap_or((stdout.as_str(), "0"));
+    match code.trim().parse::<u16>().unwrap_or(0) {
+        200 => {
+            let versions = match serde_json::from_str::<serde_json::Value>(body.trim()) {
+                Ok(json) => json
+                    .get("versions")
+                    .and_then(|v| v.as_object())
+                    .map(|o| o.keys().cloned().collect())
+                    .unwrap_or_default(),
+                Err(_) => vec![],
+            };
+            RegistryPackageCheck {
+                exists: true,
+                versions,
+                error: None,
+            }
+        }
+        404 => RegistryPackageCheck {
+            exists: false,
+            versions: vec![],
+            error: None,
+        },
+        401 | 403 => RegistryPackageCheck {
+            exists: false,
+            versions: vec![],
+            error: Some(format!("HTTP {} 需要认证", code.trim())),
+        },
+        c => RegistryPackageCheck {
+            exists: false,
+            versions: vec![],
+            error: Some(format!("HTTP {} 检查失败", c)),
+        },
+    }
+}
+
+/// 在指定目录跑 npm 命令（自动注入 NODE_EXTRA_CA_CERTS 以信任已锚定的自签证书）。
+fn run_npm_in(dir: &str, args: &[&str]) -> (i32, String) {
+    let all_pem = format!("{}\\all.pem", certs_dir());
+    let mut cmd = Command::new("npm.cmd");
+    cmd.current_dir(dir).args(args);
+    if Path::new(&all_pem).exists() {
+        cmd.env("NODE_EXTRA_CA_CERTS", &all_pem);
+    }
+    match cmd.output() {
+        Ok(o) => {
+            let code = o.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let combined = if stdout.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                format!("{}\n{}", stdout.trim(), stderr.trim())
+            };
+            (code, combined)
+        }
+        Err(e) => (-1, format!("npm 启动失败: {}", e)),
+    }
+}
+
+/// 批量发布：每个包 撞车预检 → （可选）构建 → npm publish。
+#[tauri::command]
+fn publish_packages(
+    packages: Vec<String>,
+    registry: String,
+    build: bool,
+) -> Result<Vec<PublishResult>, String> {
+    let reg = registry.trim().to_string();
+    if reg.is_empty() {
+        return Err("请填写发布源 registry".to_string());
+    }
+    let mut results = Vec::new();
+    for dir in &packages {
+        let pj = Path::new(dir).join("package.json");
+        let content = std::fs::read_to_string(&pj).map_err(|e| format!("{}: {}", dir, e))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| format!("{}: {}", dir, e))?;
+        let name = v["name"].as_str().unwrap_or("").to_string();
+        let version = v["version"].as_str().unwrap_or("").to_string();
+        let display = if name.is_empty() {
+            dir.clone()
+        } else {
+            format!("{}@{}", name, version)
+        };
+
+        // 1) 版本撞车预检
+        let check = check_registry_package(reg.clone(), name.clone());
+        if let Some(e) = &check.error {
+            results.push(PublishResult {
+                name: display,
+                version: version.clone(),
+                ok: false,
+                message: format!("预检失败: {}", e),
+            });
+            continue;
+        }
+        if check.exists && check.versions.iter().any(|v| v == &version) {
+            results.push(PublishResult {
+                name: display,
+                version: version.clone(),
+                ok: false,
+                message: "版本已存在，跳过（撞车）".to_string(),
+            });
+            continue;
+        }
+
+        // 2) 构建（可选）
+        if build {
+            let (code, out) = run_npm_in(dir, &["run", "build"]);
+            if code != 0 {
+                results.push(PublishResult {
+                    name: display,
+                    version: version.clone(),
+                    ok: false,
+                    message: format!("构建失败:\n{}", out),
+                });
+                continue;
+            }
+        }
+
+        // 3) 发布
+        let npm_args: Vec<String> = vec![
+            "publish".into(),
+            "--registry".into(),
+            reg.clone(),
+            "--fetch-retries".into(),
+            "0".into(),
+        ];
+        let arg_refs: Vec<&str> = npm_args.iter().map(|s| s.as_str()).collect();
+        let (code, out) = run_npm_in(dir, &arg_refs);
+        if code == 0 {
+            results.push(PublishResult {
+                name: display,
+                version,
+                ok: true,
+                message: "发布成功".to_string(),
+            });
+        } else {
+            results.push(PublishResult {
+                name: display,
+                version,
+                ok: false,
+                message: format!("发布失败:\n{}", out),
+            });
+        }
+    }
+    Ok(results)
+}
+
+/// 检查 npm/Node 侧证书信任环境（NODE_EXTRA_CA_CERTS 是否指向工具管理的 all.pem）。
+#[tauri::command]
+fn check_node_extra_ca() -> NodeCaInfo {
+    let all_pem = format!("{}\\all.pem", certs_dir());
+    let all_pem_exists = Path::new(&all_pem).exists();
+    let env = std::env::var("NODE_EXTRA_CA_CERTS").unwrap_or_default();
+    let env_set = !env.trim().is_empty();
+    let env_matches = env.trim().trim_end_matches('\\').eq_ignore_ascii_case(&all_pem);
+    NodeCaInfo {
+        all_pem_exists,
+        env_set,
+        env_matches,
+    }
+}
+
 /// 从 npmmirror 下载安装最新 LTS Node，通过事件上报阶段进度。
 #[tauri::command]
 fn install_node(app: tauri::AppHandle) -> Result<InstallResult, String> {
@@ -811,6 +1458,11 @@ fn list_accounts() -> AccountsFile {
 fn save_account(account: Account) -> Result<AccountsFile, String> {
     let mut file = read_accounts();
     if let Some(existing) = file.accounts.iter_mut().find(|a| a.id == account.id) {
+        // 作用域变更（全局<->项目、项目A->项目B）时，清理旧位置残留凭据
+        if existing.project_dir != account.project_dir {
+            let old = existing.clone();
+            let _ = remove_npmrc_credential(&old);
+        }
         *existing = account;
     } else {
         file.accounts.push(account);
@@ -822,11 +1474,16 @@ fn save_account(account: Account) -> Result<AccountsFile, String> {
 #[tauri::command]
 fn delete_account(id: String) -> Result<AccountsFile, String> {
     let mut file = read_accounts();
+    let target = file.accounts.iter().find(|a| a.id == id).cloned();
     file.accounts.retain(|a| a.id != id);
     if file.active.as_deref() == Some(&id) {
         file.active = None;
     }
     write_accounts(&file)?;
+    // 清理该账号留在 .npmrc 里的凭据（best-effort，失败不阻断删除）
+    if let Some(acc) = target {
+        let _ = remove_npmrc_credential(&acc);
+    }
     Ok(file)
 }
 
@@ -1388,11 +2045,853 @@ fn apply_project(path: String) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Python：检测 / 版本管理 / pip 镜像 / 项目
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonEnvInfo {
+    pub installed: bool,
+    pub store_stub: bool,
+    pub real_python_exe: Option<String>,
+    pub python_version: Option<String>,
+    pub pip_version: Option<String>,
+    pub in_path: bool,
+    pub python_dir_in_path: Option<String>,
+    pub foreign: Vec<ForeignPython>,
+    pub network: Vec<NetworkProbe>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignPython {
+    pub kind: String,
+    pub path: String,
+    pub version: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonVersionsInfo {
+    pub py_launcher_detected: bool,
+    pub install_dir: String,
+    pub installed: Vec<InstalledVersion>,
+    pub available: Vec<String>,
+    pub current: Option<String>,
+}
+
+fn python_install_root() -> String {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    format!("{}\\Programs\\python", local)
+}
+
+fn parse_python_version(s: &str) -> Option<(i32, i32, i32)> {
+    let t = s.trim().strip_prefix('v').unwrap_or(s.trim());
+    let mut it = t.split('.');
+    let major: i32 = it.next()?.parse().ok()?;
+    let minor: i32 = it.next()?.parse().ok()?;
+    let patch: i32 = it.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn version_str(v: (i32, i32, i32)) -> String {
+    format!("{}.{}.{}", v.0, v.1, v.2)
+}
+
+/// 从 npmmirror python 目录索引解析可用版本：每个小版本取最新 patch。
+fn fetch_available_python_versions() -> Vec<String> {
+    let json = run_cmd(
+        "curl.exe",
+        &[
+            "-s",
+            "-m",
+            "15",
+            "https://registry.npmmirror.com/-/binary/python/",
+        ],
+    )
+    .unwrap_or_default();
+    let re = regex::Regex::new(r#""name":"(\d+)\.(\d+)\.(\d+)/""#).unwrap();
+    let mut best: std::collections::HashMap<i32, (i32, i32)> = std::collections::HashMap::new();
+    for cap in re.captures_iter(&json) {
+        let major: i32 = cap[1].parse().unwrap_or(0);
+        if major != 3 {
+            continue;
+        }
+        let minor: i32 = cap[2].parse().unwrap_or(0);
+        // 3.8 以下已不可用（python-build-standalone 最低 3.8，现代 pip 也不支持），过滤
+        if minor < 8 {
+            continue;
+        }
+        let patch: i32 = cap[3].parse().unwrap_or(0);
+        let e = best.entry(minor).or_insert((0, 0));
+        if patch > e.1 {
+            *e = (minor, patch);
+        }
+    }
+    let mut minors: Vec<i32> = best.keys().cloned().collect();
+    minors.sort_unstable();
+    minors.reverse();
+    minors
+        .iter()
+        .map(|m| {
+            let (min, p) = best[m];
+            format!("3.{}.{}", min, p)
+        })
+        .collect()
+}
+
+fn latest_patch_for_minor(minor: i32) -> Option<String> {
+    fetch_available_python_versions()
+        .into_iter()
+        .find(|v| parse_python_version(v).map(|(_, m, _)| m == minor).unwrap_or(false))
+}
+
+/// 当前自管 Python 版本：扫 PATH 中 parent 为 install_root 的目录（或 Scripts 子目录）。
+fn current_python_version_from_path() -> Option<String> {
+    let root_lower = python_install_root().to_lowercase();
+    for dir in get_registry_path_entries() {
+        let p = Path::new(&dir);
+        if let Some(parent) = p.parent() {
+            if parent.to_string_lossy().to_lowercase() == root_lower {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if parse_python_version(name).is_some() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+        if p.file_name().and_then(|n| n.to_str()) == Some("Scripts") {
+            if let Some(parent) = p.parent() {
+                if let Some(gp) = parent.parent() {
+                    if gp.to_string_lossy().to_lowercase() == root_lower {
+                        if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                            if parse_python_version(name).is_some() {
+                                return Some(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_current_python_version() -> Option<String> {
+    if let Some(v) = current_python_version_from_path() {
+        return Some(v);
+    }
+    if let Some(out) = run_cmd("python", &["-V"]) {
+        let t = out.trim();
+        if let Some(v) = t.strip_prefix("Python ") {
+            return Some(v.to_string());
+        }
+        if parse_python_version(t).is_some() {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+fn detect_py_launcher() -> bool {
+    if run_cmd("py", &["--version"]).is_some() {
+        return true;
+    }
+    if let Ok(root) = std::env::var("SystemRoot") {
+        if Path::new(&format!("{}\\py.exe", root)).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 在 python-build-standalone 日期目录里从新到旧找目标版本的 tarball URL。
+fn find_python_build_standalone(version: &str) -> Option<String> {
+    let base = "https://registry.npmmirror.com/-/binary/python-build-standalone";
+    let index = run_cmd("curl.exe", &["-s", "-m", "15", &format!("{}/", base)]).unwrap_or_default();
+    let re = regex::Regex::new(r#""name":"(\d{8})/""#).unwrap();
+    let mut dates: Vec<String> = re.captures_iter(&index).map(|c| c[1].to_string()).collect();
+    dates.sort();
+    dates.reverse();
+    for date in dates {
+        for variant in ["install_only", "install_only_stripped"] {
+            let name = format!(
+                "cpython-{}+{}-x86_64-pc-windows-msvc-{}.tar.gz",
+                version, date, variant
+            );
+            let url = format!("{}/{}/{}", base, date, name);
+            let code = run_cmd(
+                "curl.exe",
+                &["-s", "-o", "NUL", "-w", "%{http_code}", "-I", "-L", "-m", "6", url.as_str()],
+            )
+            .unwrap_or_default();
+            if code.trim() == "200" {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+/// 下载并安装指定版本的 Python 到 install root。
+/// 优先 npmmirror 完整 zip（3.11.9+），老版本回退 python-build-standalone。
+pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
+    let ver = version.trim().strip_prefix('v').unwrap_or(version.trim()).to_string();
+    let local = std::env::var("LOCALAPPDATA").map_err(|_| "缺少 LOCALAPPDATA".to_string())?;
+    let parent = format!("{}\\Programs\\python", local);
+    let target = format!("{}\\{}", parent, ver);
+
+    if Path::new(&format!("{}\\python.exe", target)).exists() {
+        return Ok(target);
+    }
+    let _ = std::fs::create_dir_all(&parent);
+
+    // 路径 A：npmmirror 官方重打包完整 zip（带 pip，python -m pip 可用）
+    emit("downloading");
+    let zip_url = format!(
+        "https://registry.npmmirror.com/-/binary/python/{}/python-{}-amd64.zip",
+        ver, ver
+    );
+    let zip_path = format!("{}\\python-{}-amd64.zip", parent, ver);
+    let dl_ok = Command::new("curl.exe")
+        .args(["-f", "-L", "-s", "-o", &zip_path, &zip_url])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if dl_ok && Path::new(&zip_path).exists() {
+        emit("extracting");
+        let _ = std::fs::create_dir_all(&target);
+        let _ = run_cmd("tar.exe", &["-xf", &zip_path, "-C", &target]);
+        let _ = std::fs::remove_file(&zip_path);
+        if Path::new(&format!("{}\\python.exe", target)).exists() {
+            return Ok(target);
+        }
+    }
+    let _ = std::fs::remove_file(&zip_path);
+
+    // 路径 B：python-build-standalone 兜底（老版本）
+    emit("connecting");
+    if let Some(tar_url) = find_python_build_standalone(&ver) {
+        emit("downloading");
+        let tar_path = format!("{}\\python-{}.tar.gz", parent, ver);
+        let dl_ok = Command::new("curl.exe")
+            .args(["-f", "-L", "-s", "-o", &tar_path, &tar_url])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if dl_ok && Path::new(&tar_path).exists() {
+            emit("extracting");
+            let _ = std::fs::remove_dir_all(&target);
+            let _ = std::fs::create_dir_all(&target);
+            let _ = run_cmd("tar.exe", &["-xf", &tar_path, "-C", &target]);
+            let _ = std::fs::remove_file(&tar_path);
+            // python-build-standalone 顶层是 python/ 目录，摊平到 target
+            let nested = Path::new(&target).join("python");
+            if nested.exists() && !Path::new(&format!("{}\\python.exe", target)).exists() {
+                if let Ok(entries) = std::fs::read_dir(&nested) {
+                    for e in entries.flatten() {
+                        let _ = std::fs::rename(&e.path(), Path::new(&target).join(e.file_name()));
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&nested);
+            }
+            if Path::new(&format!("{}\\python.exe", target)).exists() {
+                return Ok(target);
+            }
+        }
+        let _ = std::fs::remove_file(&tar_path);
+    }
+    Err(format!(
+        "下载 Python {} 失败（npmmirror zip 与 python-build-standalone 均不可用）",
+        ver
+    ))
+}
+
+/// 把 target 与 target\Scripts 写入用户 PATH（移除旧的 python\3.* 条目，置顶）。
+fn update_user_path_for_python(target: &str) -> Result<(), String> {
+    let ps = format!(
+        "$t='{}'; $s='{}\\Scripts'; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
+         $parts = $p -split ';' | Where-Object {{ $_ -notmatch 'Programs\\\\python\\\\3\\.' }}; \
+         $new = ($t + ';' + $s + ';' + ($parts -join ';')).TrimEnd(';'); \
+         [Environment]::SetEnvironmentVariable('Path', $new, 'User')",
+        target, target
+    );
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+/// 读取 pip 配置文件（%APPDATA%\pip\pip.ini 或 PIP_CONFIG_FILE）。
+fn pip_ini_path() -> String {
+    if let Ok(p) = std::env::var("PIP_CONFIG_FILE") {
+        return p;
+    }
+    std::env::var("APPDATA")
+        .map(|a| format!("{}\\pip\\pip.ini", a))
+        .unwrap_or_else(|_| "pip.ini".to_string())
+}
+
+#[tauri::command]
+fn detect_python() -> PythonEnvInfo {
+    let mut info = PythonEnvInfo::default();
+
+    if let Some(apps) = windows_apps_dir() {
+        for name in ["python.exe", "python3.exe"] {
+            let stub = Path::new(&apps).join(name);
+            if stub.exists() && is_zero_byte_stub(&stub) {
+                info.store_stub = true;
+            }
+        }
+    }
+
+    let apps_norm = windows_apps_dir().map(|d| d.to_lowercase());
+    for dir in get_registry_path_entries() {
+        if let Some(apps) = &apps_norm {
+            if dir.to_lowercase() == *apps {
+                continue;
+            }
+        }
+        let cand = Path::new(&dir).join("python.exe");
+        if cand.exists() {
+            info.real_python_exe = Some(cand.to_string_lossy().to_string());
+            info.in_path = true;
+            info.python_dir_in_path = Some(dir.clone());
+            break;
+        }
+    }
+
+    if let Some(exe) = &info.real_python_exe {
+        if let Some(v) = run_cmd(exe, &["-V"]) {
+            let t = v.trim();
+            info.python_version = Some(
+                t.strip_prefix("Python ")
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| t.to_string()),
+            );
+            info.installed = true;
+        }
+        if let Some(pv) = run_cmd(exe, &["-m", "pip", "--version"]) {
+            info.pip_version = Some(pv.trim().to_string());
+        }
+    }
+
+    // 外来安装：官方安装器 / py launcher / conda（只报告，不干预）
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    if let Ok(entries) = std::fs::read_dir(format!("{}\\Programs\\Python", local)) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("Python3") {
+                let exe = e.path().join("python.exe");
+                if exe.exists() {
+                    let v = run_cmd(exe.to_string_lossy().as_ref(), &["-V"])
+                        .map(|s| s.trim().to_string());
+                    info.foreign.push(ForeignPython {
+                        kind: "official-install".to_string(),
+                        path: exe.to_string_lossy().to_string(),
+                        version: v,
+                    });
+                }
+            }
+        }
+    }
+    if let Some(v) = run_cmd("py", &["-3", "-V"]) {
+        info.foreign.push(ForeignPython {
+            kind: "py-launcher".to_string(),
+            path: "py -3".to_string(),
+            version: Some(v.trim().to_string()),
+        });
+    }
+    if let Some(v) = run_cmd("conda", &["--version"]) {
+        info.foreign.push(ForeignPython {
+            kind: "conda".to_string(),
+            path: "conda".to_string(),
+            version: Some(v.trim().to_string()),
+        });
+    }
+
+    info.network = vec![
+        probe("官方 PyPI", "https://pypi.org/simple/"),
+        probe("清华 TUNA", "https://pypi.tuna.tsinghua.edu.cn/simple/"),
+        probe("阿里云", "https://mirrors.aliyun.com/pypi/simple/"),
+    ];
+    info
+}
+
+#[tauri::command]
+fn list_python_versions() -> PythonVersionsInfo {
+    let install_dir = python_install_root();
+    let current = detect_current_python_version();
+    let mut installed = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&install_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if parse_python_version(&name).is_some() {
+                let is_cur = current.as_deref() == Some(name.as_str());
+                let size_mb = dir_size(&entry.path()).map(|b| b / 1024 / 1024);
+                installed.push(InstalledVersion {
+                    version: name.clone(),
+                    current: is_cur,
+                    size_mb,
+                });
+            }
+        }
+    }
+    installed.sort_by(|a, b| {
+        let pa = parse_python_version(&a.version).unwrap_or((0, 0, 0));
+        let pb = parse_python_version(&b.version).unwrap_or((0, 0, 0));
+        pb.cmp(&pa)
+    });
+    let available = fetch_available_python_versions();
+    PythonVersionsInfo {
+        py_launcher_detected: detect_py_launcher(),
+        install_dir,
+        installed,
+        available,
+        current,
+    }
+}
+
+#[tauri::command]
+fn install_python_version(app: tauri::AppHandle, version: String) -> Result<InstallResult, String> {
+    use tauri::Emitter;
+
+    let _ = app.emit(
+        "python-version-progress",
+        serde_json::json!({ "stage": "connecting", "version": version }),
+    );
+    let dir = install_python_specific(&version, |stage| {
+        let _ = app.emit(
+            "python-version-progress",
+            serde_json::json!({ "stage": stage, "version": version }),
+        );
+    })?;
+    let _ = app.emit(
+        "python-version-progress",
+        serde_json::json!({ "stage": "done", "version": version }),
+    );
+    Ok(InstallResult {
+        ok: true,
+        version,
+        dir,
+    })
+}
+
+#[tauri::command]
+fn switch_python_version(version: String) -> Result<String, String> {
+    let install_dir = python_install_root();
+    let target = format!("{}\\{}", install_dir, version);
+    if !Path::new(&format!("{}\\python.exe", target)).exists() {
+        return Err(format!("版本 {} 尚未安装", version));
+    }
+    update_user_path_for_python(&target)?;
+    Ok(target)
+}
+
+#[tauri::command]
+fn uninstall_python_version(version: String) -> Result<String, String> {
+    let install_dir = python_install_root();
+    let target = format!("{}\\{}", install_dir, version);
+    if !Path::new(&target).exists() {
+        return Err(format!("版本 {} 不存在", version));
+    }
+    if let Some(cur) = current_python_version_from_path() {
+        if cur == version {
+            return Err("不能卸载当前正在使用的版本".to_string());
+        }
+    }
+    std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
+/// 读取 pip 全局 index-url。
+#[tauri::command]
+fn read_pip_index() -> Result<Option<String>, String> {
+    let path = pip_ini_path();
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut in_global = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t == "[global]" {
+            in_global = true;
+            continue;
+        }
+        if t.starts_with('[') {
+            in_global = false;
+            continue;
+        }
+        if in_global {
+            if let Some(v) = t
+                .strip_prefix("index-url=")
+                .or_else(|| t.strip_prefix("index-url ="))
+            {
+                return Ok(Some(v.trim().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// 写入 pip 全局 index-url（[global] 段，自动备份 .bak）。
+#[tauri::command]
+fn set_pip_index(url: String) -> Result<RegistryResult, String> {
+    let path = pip_ini_path();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::copy(&path, format!("{}.bak", path));
+
+    let mut out: Vec<String> = Vec::new();
+    let mut global_idx: Option<usize> = None;
+    for line in existing.lines() {
+        let t = line.trim();
+        if t == "[global]" {
+            global_idx = Some(out.len());
+        }
+        if t.starts_with("index-url") {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    let url_line = format!("index-url = {}", url);
+    match global_idx {
+        Some(i) => {
+            out.insert(i + 1, url_line);
+        }
+        None => {
+            if !out.is_empty() && !out.iter().any(|l| l.trim().starts_with('[')) {
+                out.insert(0, String::new());
+                out.insert(0, "[global]".to_string());
+                out.push(url_line);
+            } else {
+                out.push(String::new());
+                out.push("[global]".to_string());
+                out.push(url_line);
+            }
+        }
+    }
+    if let Some(parent) = Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, out.join("\n") + "\n").map_err(|e| e.to_string())?;
+    Ok(RegistryResult { ok: true, path })
+}
+
+/// PyPI 统一探测：GET {base}/simple/ 判可达，拉取 pip 包页测吞吐/验认证。
+fn probe_pypi_endpoint(registry_base: &str, auth_args: &[&str]) -> RegistryTestResult {
+    let mut result = RegistryTestResult::default();
+
+    let ping = probe_curl(&format!("{}/simple/", registry_base), auth_args);
+    if ping.status == 0 {
+        result.reachable = false;
+        if let Some(e) = &ping.error {
+            if is_cert_error(e) {
+                result.error = Some("证书不受信任（自签/私有CA）".to_string());
+                result.cert_issue = true;
+            } else {
+                result.error = Some(format!("连接失败：{}", e));
+            }
+        } else {
+            result.error = Some("连接失败（无法建立连接或超时）".to_string());
+        }
+        return result;
+    }
+    if ping.status == 401 || ping.status == 403 {
+        result.reachable = true;
+        result.needs_auth = true;
+        result.error = Some(format!("HTTP {} 需要认证", ping.status));
+        return result;
+    }
+    if !(200..400).contains(&ping.status) {
+        result.reachable = false;
+        result.error = Some(format!("HTTP {} 异常", ping.status));
+        return result;
+    }
+    result.reachable = true;
+    result.status = Some(ping.status);
+    result.latency_ms = ping.latency_ms;
+
+    let pkg = probe_curl(&format!("{}/simple/pip/", registry_base), auth_args);
+    match pkg.status {
+        200..=399 => result.throughput_kbs = pkg.throughput_kbs,
+        401 | 403 => result.needs_auth = true,
+        _ => { /* 源正常但包页缺失，忽略 */ }
+    }
+    result
+}
+
+#[tauri::command]
+fn test_pypi(url: String) -> RegistryTestResult {
+    let mut u = url.trim().to_string();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        u = format!("http://{}", u);
+    }
+    while u.ends_with('/') {
+        u.pop();
+    }
+    probe_pypi_endpoint(&u, &[])
+}
+
+// ---- Python 项目 ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonProjectInfo {
+    pub path: String,
+    pub python_requirement: Option<String>,
+    pub requirement_source: Option<String>,
+    pub pkg_tool: Option<String>,
+    pub index: Option<String>,
+    pub has_python_version_file: bool,
+    pub has_pyproject_toml: bool,
+    pub has_runtime_txt: bool,
+    pub has_pipfile: bool,
+    pub current_python: Option<String>,
+    pub python_installed: bool,
+}
+
+fn resolve_python_req(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if let Some(v) = parse_python_version(t) {
+        return Some(version_str(v));
+    }
+    if let Some(v) = regex::Regex::new(r"^(\d+)\.(\d+)$")
+        .ok()
+        .and_then(|re| re.captures(t))
+    {
+        let minor: i32 = v[2].parse().unwrap_or(0);
+        return latest_patch_for_minor(minor);
+    }
+    if regex::Regex::new(r"^3(\.x)?$")
+        .ok()
+        .and_then(|re| re.captures(t))
+        .is_some()
+    {
+        return fetch_available_python_versions().first().cloned();
+    }
+    None
+}
+
+/// 解析 pyproject.toml requires-python：">=3.11" / ">=3.11,<4" / "^3.11" 等，取最低版本。
+fn parse_requires_python(spec: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?:>=|==|~=|~=|\^)?\s*(\d+\.\d+(?:\.\d+)?)").ok()?;
+    let cap = re.captures(spec)?;
+    let v = cap[1].to_string();
+    if let Some((maj, min, pat)) = parse_python_version(&v) {
+        if pat == 0 {
+            latest_patch_for_minor(min)
+        } else {
+            Some(version_str((maj, min, pat)))
+        }
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err("路径不是有效目录".to_string());
+    }
+
+    let mut info = PythonProjectInfo {
+        path: path.clone(),
+        python_requirement: None,
+        requirement_source: None,
+        pkg_tool: None,
+        index: None,
+        has_python_version_file: false,
+        has_pyproject_toml: false,
+        has_runtime_txt: false,
+        has_pipfile: false,
+        current_python: detect_current_python_version(),
+        python_installed: false,
+    };
+
+    let pv = p.join(".python-version");
+    if pv.exists() {
+        info.has_python_version_file = true;
+        if let Ok(c) = std::fs::read_to_string(&pv) {
+            if let Some(req) = resolve_python_req(&c) {
+                info.python_requirement = Some(req);
+                info.requirement_source = Some(".python-version".to_string());
+            }
+        }
+    }
+
+    let pyproj = p.join("pyproject.toml");
+    if pyproj.exists() {
+        info.has_pyproject_toml = true;
+        if let Ok(c) = std::fs::read_to_string(&pyproj) {
+            if info.python_requirement.is_none() {
+                let re = regex::Regex::new(r#"(?m)^requires-python\s*=\s*"([^"]+)""#).unwrap();
+                if let Some(cap) = re.captures(&c) {
+                    if let Some(req) = parse_requires_python(&cap[1]) {
+                        info.python_requirement = Some(req);
+                        info.requirement_source = Some("pyproject.toml requires-python".to_string());
+                    }
+                }
+            }
+            if info.pkg_tool.is_none() {
+                for tool in ["uv", "poetry", "pipenv", "hatchling", "setuptools"] {
+                    if c.contains(&format!("[tool.{}]", tool)) {
+                        info.pkg_tool = Some(tool.to_string());
+                        break;
+                    }
+                }
+            }
+            if info.index.is_none() {
+                let re2 = regex::Regex::new(r#"(?m)^index\s*=\s*"([^"]+)""#).unwrap();
+                if let Some(cap) = re2.captures(&c) {
+                    info.index = Some(cap[1].to_string());
+                }
+            }
+        }
+    }
+
+    let rt = p.join("runtime.txt");
+    if rt.exists() {
+        info.has_runtime_txt = true;
+        if info.python_requirement.is_none() {
+            if let Ok(c) = std::fs::read_to_string(&rt) {
+                let t = c.trim();
+                let t = t.strip_prefix("python-").unwrap_or(t);
+                if let Some(req) = resolve_python_req(t) {
+                    info.python_requirement = Some(req);
+                    info.requirement_source = Some("runtime.txt".to_string());
+                }
+            }
+        }
+    }
+
+    let pf = p.join("Pipfile");
+    if pf.exists() {
+        info.has_pipfile = true;
+        if info.python_requirement.is_none() {
+            if let Ok(c) = std::fs::read_to_string(&pf) {
+                let re = regex::Regex::new(r#"(?m)^python_version\s*=\s*"([^"]+)""#).unwrap();
+                if let Some(cap) = re.captures(&c) {
+                    if let Some(req) = resolve_python_req(&cap[1]) {
+                        info.python_requirement = Some(req);
+                        info.requirement_source = Some("Pipfile".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(req) = &info.python_requirement {
+        let root = python_install_root();
+        info.python_installed = Path::new(&format!("{}\\{}\\python.exe", root, req)).exists();
+    }
+
+    Ok(info)
+}
+
+/// 应用项目配置：安装+切换要求的 Python 版本。
+#[tauri::command]
+fn apply_python_project(path: String) -> Result<String, String> {
+    let info = inspect_python_project(path.clone())?;
+    let mut msgs = Vec::new();
+    if let Some(req) = &info.python_requirement {
+        if !info.python_installed {
+            let _dir = install_python_specific(req, |_| {})?;
+            msgs.push(format!("已安装 Python {}", req));
+        }
+        let target = format!("{}\\{}", python_install_root(), req);
+        if Path::new(&format!("{}\\python.exe", target)).exists() {
+            update_user_path_for_python(&target)?;
+            msgs.push(format!("Python 已切换到 {}", req));
+        }
+    } else {
+        msgs.push("未检测到项目 Python 版本要求（.python-version / pyproject.toml / runtime.txt / Pipfile）".to_string());
+    }
+    Ok(msgs.join("\n"))
+}
+
+// ---- Python 包管理器 ----
+
+fn python_pkg_data_dir(name: &str, user: &str, local: &str) -> String {
+    match name {
+        "pip" => format!("{}\\pip\\cache", local),
+        "uv" => format!("{}\\uv", local),
+        "poetry" => format!("{}\\pypoetry", user),
+        "pipenv" => format!("{}\\pipenv", local),
+        "conda" => format!("{}\\miniconda3", user),
+        _ => format!("{}\\.{}", user, name),
+    }
+}
+
+#[tauri::command]
+fn list_python_pkg_managers() -> Vec<PkgManagerInfo> {
+    let user = std::env::var("USERPROFILE").unwrap_or_default();
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let tools = ["pip", "uv", "poetry", "pipenv", "conda"];
+    let entries = get_registry_path_entries();
+    let mut out = Vec::new();
+    for name in tools {
+        let bin = find_in_path_entries(name, &entries);
+        let mut info = PkgManagerInfo {
+            name: name.to_string(),
+            installed: bin.is_some(),
+            version: None,
+            bin_path: bin.clone(),
+            data_dir: Some(python_pkg_data_dir(name, &user, &local)),
+        };
+        if let Some(b) = &bin {
+            if let Some(v) = run_cmd(b, &["--version"]) {
+                info.version = Some(v.trim().to_string());
+            }
+        } else if name == "pip" {
+            if let Some(v) = run_cmd("python", &["-m", "pip", "--version"]) {
+                info.installed = true;
+                info.version = Some(v.trim().to_string());
+                info.bin_path = Some("python -m pip".to_string());
+            }
+        }
+        out.push(info);
+    }
+    out
+}
+
+#[tauri::command]
+fn install_python_pkg_manager(name: String, version: Option<String>) -> Result<String, String> {
+    let ver = version.unwrap_or_else(|| "latest".to_string());
+    match name.as_str() {
+        "pip" => Err("pip 随 Python 内置，无需单独安装".to_string()),
+        "conda" => Err("conda 需安装 Miniconda，暂不支持自动安装".to_string()),
+        _ => {
+            let target = if ver == "latest" {
+                name.clone()
+            } else {
+                format!("{}=={}", name, ver)
+            };
+            let out = Command::new("python")
+                .args(["-m", "pip", "install", &target])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if out.status.success() {
+                Ok(format!("已安装 {}", target))
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).to_string())
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI API（无 GUI 版本复用，不含 #[tauri::command] 宏）
 // ---------------------------------------------------------------------------
 
 pub mod api {
-    use crate::{NodeEnvInfo, RegistryResult, VersionsInfo};
+    use crate::{
+        NodeEnvInfo, PythonEnvInfo, PythonProjectInfo, PythonVersionsInfo, RegistryResult,
+        RegistryTestResult, VersionsInfo,
+    };
 
     pub fn detect_node() -> NodeEnvInfo {
         crate::detect_node()
@@ -1418,6 +2917,47 @@ pub mod api {
     pub fn detect_nvm() -> bool {
         crate::detect_nvm()
     }
+
+    // ---- Python ----
+    pub fn detect_python() -> PythonEnvInfo {
+        crate::detect_python()
+    }
+    pub fn read_pip_index() -> Result<Option<String>, String> {
+        crate::read_pip_index()
+    }
+    pub fn set_pip_index(url: String) -> Result<RegistryResult, String> {
+        crate::set_pip_index(url)
+    }
+    pub fn test_pypi(url: String) -> RegistryTestResult {
+        crate::test_pypi(url)
+    }
+    pub fn list_python_versions() -> PythonVersionsInfo {
+        crate::list_python_versions()
+    }
+    pub fn switch_python_version(version: String) -> Result<String, String> {
+        crate::switch_python_version(version)
+    }
+    pub fn uninstall_python_version(version: String) -> Result<String, String> {
+        crate::uninstall_python_version(version)
+    }
+    pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
+        crate::install_python_specific(version, emit)
+    }
+    pub fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
+        crate::inspect_python_project(path)
+    }
+    pub fn apply_python_project(path: String) -> Result<String, String> {
+        crate::apply_python_project(path)
+    }
+    pub fn list_python_pkg_managers() -> Vec<crate::PkgManagerInfo> {
+        crate::list_python_pkg_managers()
+    }
+    pub fn install_python_pkg_manager(
+        name: String,
+        version: Option<String>,
+    ) -> Result<String, String> {
+        crate::install_python_pkg_manager(name, version)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,6 +2977,14 @@ pub fn run() {
             fix_path,
             install_node,
             test_registry,
+            probe_cert,
+            accept_cert,
+            list_trusted_certs,
+            remove_trusted_cert,
+            list_publish_packages,
+            check_registry_package,
+            publish_packages,
+            check_node_extra_ca,
             list_accounts,
             save_account,
             delete_account,
@@ -1452,6 +3000,18 @@ pub fn run() {
             install_pkg_manager,
             inspect_project,
             apply_project,
+            detect_python,
+            read_pip_index,
+            set_pip_index,
+            test_pypi,
+            list_python_versions,
+            install_python_version,
+            switch_python_version,
+            uninstall_python_version,
+            inspect_python_project,
+            apply_python_project,
+            list_python_pkg_managers,
+            install_python_pkg_manager,
             git_cmds::git_list_accounts,
             git_cmds::git_get_identity,
             git_cmds::git_get_stats,

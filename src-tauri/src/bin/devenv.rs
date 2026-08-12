@@ -22,6 +22,9 @@ enum Command {
     /// Node 相关操作
     #[command(subcommand)]
     Node(NodeCmd),
+    /// Python 相关操作
+    #[command(subcommand)]
+    Python(PythonCmd),
     /// Git 相关操作
     #[command(subcommand)]
     Git(GitCmd),
@@ -36,6 +39,22 @@ enum NodeCmd {
     /// 列出已安装和可用版本
     Versions,
     /// 安装指定版本（devenv node install v26.7.0）
+    Install { version: String },
+    /// 切换版本
+    Switch { version: String },
+    /// 卸载版本
+    Uninstall { version: String },
+}
+
+#[derive(Subcommand)]
+enum PythonCmd {
+    /// 检测 Python 环境状态
+    Status,
+    /// 查看或设置 pip 镜像（devenv python registry [set <url>]）
+    Registry { set: Option<String> },
+    /// 列出已安装和可用版本
+    Versions,
+    /// 安装指定版本（devenv python install 3.12.4）
     Install { version: String },
     /// 切换版本
     Switch { version: String },
@@ -68,6 +87,7 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Node(cmd) => run_node(cmd),
+        Command::Python(cmd) => run_python(cmd),
         Command::Git(cmd) => run_git(cmd),
     }
 }
@@ -147,6 +167,104 @@ fn run_node(cmd: NodeCmd) {
             Err(e) => fail(e),
         },
         NodeCmd::Uninstall { version } => match dev_env_manager::api::uninstall_version(version.clone()) {
+            Ok(dir) => println!("✓ 已卸载 {}（{}）", version, dir),
+            Err(e) => fail(e),
+        },
+    }
+}
+
+// ── Python ──────────────────────────────────────────────────────
+
+fn run_python(cmd: PythonCmd) {
+    match cmd {
+        PythonCmd::Status => {
+            let info = dev_env_manager::api::detect_python();
+            println!("Python 环境体检:");
+            println!("  安装状态 : {}", if info.installed { "已安装 ✓" } else { "未安装 ✗" });
+            println!("  Python   : {}", info.python_version.as_deref().unwrap_or("-"));
+            println!("  pip      : {}", info.pip_version.as_deref().unwrap_or("-"));
+            println!("  PATH     : {}", if info.in_path { "已配置 ✓" } else { "未配置 ✗" });
+            if let Some(p) = &info.real_python_exe {
+                println!("  可执行文件: {}", p);
+            }
+            if info.store_stub {
+                println!("  ⚠ 检测到商店假命令（python 可能打开微软商店）");
+            }
+            for f in &info.foreign {
+                println!(
+                    "  外来安装 : [{}] {} {}",
+                    f.kind,
+                    f.path,
+                    f.version.as_deref().unwrap_or("")
+                );
+            }
+            println!("  网络连通性:");
+            for n in &info.network {
+                let s = if n.ok {
+                    format!("可达 · {}ms", n.latency_ms.unwrap_or(0))
+                } else {
+                    format!("不可达 · {}", n.error.as_deref().unwrap_or(""))
+                };
+                println!("    {}: {}", n.name, s);
+            }
+        }
+        PythonCmd::Registry { set } => match set {
+            Some(url) => match dev_env_manager::api::set_pip_index(url.clone()) {
+                Ok(r) => println!("pip index 已设置为 {}\n写入: {}", url, r.path),
+                Err(e) => fail(format!("设置 pip 镜像失败: {}", e)),
+            },
+            None => match dev_env_manager::api::read_pip_index() {
+                Ok(Some(r)) => println!("当前 pip index: {}", r),
+                Ok(None) => println!("当前 pip index: 未设置"),
+                Err(e) => fail(format!("读取失败: {}", e)),
+            },
+        },
+        PythonCmd::Versions => {
+            let info = dev_env_manager::api::list_python_versions();
+            println!("安装目录: {}", info.install_dir);
+            println!("当前版本: {}", info.current.as_deref().unwrap_or("未设置"));
+            if info.py_launcher_detected {
+                println!("ℹ 检测到 py launcher（官方安装器），与自管版本可共存");
+            }
+            println!("\n已安装版本:");
+            if info.installed.is_empty() {
+                println!("  （无）");
+            }
+            for v in &info.installed {
+                let cur = if v.current { "  <- 当前" } else { "" };
+                println!(
+                    "  {}{}{}",
+                    v.version,
+                    if let Some(mb) = v.size_mb {
+                        format!("  ({}MB)", mb)
+                    } else {
+                        String::new()
+                    },
+                    cur
+                );
+            }
+            println!("\n可用版本（每小版本最新）:");
+            for v in info.available.iter().take(20) {
+                println!("  {}", v);
+            }
+        }
+        PythonCmd::Install { version } => {
+            println!("安装 Python {} ...", version);
+            match dev_env_manager::api::install_python_specific(&version, |stage| {
+                println!("  [{}]", stage);
+            }) {
+                Ok(dir) => println!("✓ 安装完成: {}", dir),
+                Err(e) => fail(format!("安装失败: {}", e)),
+            }
+        }
+        PythonCmd::Switch { version } => match dev_env_manager::api::switch_python_version(version.clone()) {
+            Ok(dir) => {
+                println!("✓ 已切换到 {}（{}）", version, dir);
+                println!("请重开终端使 PATH 生效");
+            }
+            Err(e) => fail(e),
+        },
+        PythonCmd::Uninstall { version } => match dev_env_manager::api::uninstall_python_version(version.clone()) {
             Ok(dir) => println!("✓ 已卸载 {}（{}）", version, dir),
             Err(e) => fail(e),
         },
