@@ -34,10 +34,9 @@
           Go
           <span class="tag">即将支持</span>
         </button>
-        <button class="nav-item disabled" data-page="python">
+        <button class="nav-item" data-page="python">
           <span class="nav-dot" style="--dot:#ffd343"></span>
           Python
-          <span class="tag">即将支持</span>
         </button>
       </nav>
 
@@ -78,6 +77,7 @@
         <button class="tab-item" data-tab="4">上传登录</button>
         <button class="tab-item" data-tab="6">包管理器</button>
         <button class="tab-item" data-tab="7">项目管理</button>
+        <button class="tab-item" data-tab="8">发布</button>
       </nav>
 
       <!-- Git 页的 Tab 栏（仅 Git 页显示） -->
@@ -86,6 +86,15 @@
         <button class="tab-item" data-gtab="2">SSH 密钥</button>
         <button class="tab-item" data-gtab="3">身份切换</button>
         <button class="tab-item" data-gtab="4">仓库同步</button>
+      </nav>
+
+      <!-- Python 页的 Tab 栏（仅 Python 页显示） -->
+      <nav class="tab-bar hidden" id="pythonTabBar">
+        <button class="tab-item active" data-ptab="1">环境诊断</button>
+        <button class="tab-item" data-ptab="2">pip 镜像</button>
+        <button class="tab-item" data-ptab="3">Python 版本</button>
+        <button class="tab-item" data-ptab="4">包管理器</button>
+        <button class="tab-item" data-ptab="5">项目管理</button>
       </nav>
 
       <!-- Tab 1: 环境诊断 -->
@@ -244,50 +253,6 @@
           <div id="accountList" class="account-list">
             <div class="empty">暂无账号，点击右上角「新增账号」</div>
           </div>
-
-          <div id="accountForm" class="account-form hidden">
-            <input type="hidden" id="accId" />
-            <div class="form-row">
-              <div class="form-field">
-                <label>账号名称</label>
-                <input id="accName" type="text" placeholder="如: 公司 Nexus" />
-              </div>
-              <div class="form-field">
-                <label>Registry 地址</label>
-                <input id="accRegistry" type="text" placeholder="https://192.168.3.8:8980/repository/npm-group/" />
-              </div>
-            </div>
-            <div class="form-row">
-              <div class="form-field">
-                <label>认证类型</label>
-                <select id="accAuthType">
-                  <option value="token">Token</option>
-                  <option value="basic">用户名 + 密码</option>
-                </select>
-              </div>
-              <div class="form-field" id="tokenField">
-                <label>Token</label>
-                <div class="secret-input">
-                  <input id="accToken" type="password" placeholder="npm token" />
-                  <button id="btnToggleToken" class="btn btn-mini btn-ghost" type="button">显示</button>
-                </div>
-              </div>
-              <div class="form-field hidden" id="basicFields">
-                <div class="form-field">
-                  <label>用户名</label>
-                  <input id="accUser" type="text" />
-                </div>
-                <div class="form-field">
-                  <label>密码</label>
-                  <input id="accPass" type="password" />
-                </div>
-              </div>
-            </div>
-            <div class="form-actions">
-              <button id="btnSaveAccount" class="btn btn-primary">保存</button>
-              <button id="btnCancelAccount" class="btn btn-ghost">取消</button>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -321,6 +286,224 @@
           </div>
           <div class="card-actions" style="margin-top:12px">
             <button id="btnApplyProject" class="btn btn-primary">应用项目配置</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 8: 发布 -->
+      <section class="tab-panel hidden" id="tabPanel8">
+        <div class="card">
+          <div class="card-head">
+            <h3>包发布</h3>
+            <div class="version-actions">
+              <button id="btnPubOpen" class="btn btn-mini btn-primary">打开项目目录</button>
+              <button id="btnPubScan" class="btn btn-mini">扫描可发包</button>
+            </div>
+          </div>
+          <div class="fix-status" id="pubStatus">打开项目目录，扫描 packages/ 下的可发布包（支持 workspace monorepo）</div>
+
+          <div class="pub-registry-row">
+            <span class="pub-label">发布源</span>
+            <select id="pubAccountSel" class="pub-account-sel"><option value="">-- 从上传登录账号选择 --</option></select>
+            <input id="pubRegistry" class="source-custom mono" placeholder="https://your-nexus:port/repository/npm-hosted/" />
+          </div>
+          <div class="fix-status pub-ca" id="pubCaStatus">—</div>
+
+          <div class="project-info" id="pubPackageList">
+            <div class="empty">尚未扫描</div>
+          </div>
+          <div class="card-actions" style="margin-top:12px">
+            <label class="pub-opt"><input type="checkbox" id="pubBuild" /> 发布前构建（npm run build）</label>
+            <button id="btnPubPublish" class="btn btn-primary">发布选中</button>
+            <button id="btnPubRefresh" class="btn btn-ghost">刷新</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Python 页 -->
+      <!-- Python Tab 1: 环境诊断 -->
+      <section class="tab-panel hidden" id="pyPanel1">
+        <div class="cards overview">
+          <div class="card overview-item" id="pyCardInstall">
+            <div class="overview-label">安装状态</div>
+            <div class="overview-value"><span class="state-dot neutral"></span><span data-field="pyInstalled">待检测</span></div>
+          </div>
+          <div class="card overview-item" id="pyCardVersion">
+            <div class="overview-label">Python 版本</div>
+            <div class="overview-value mono" data-field="pyVersion">-</div>
+          </div>
+          <div class="card overview-item" id="pyCardPip">
+            <div class="overview-label">pip 版本</div>
+            <div class="overview-value mono" data-field="pyPip">-</div>
+          </div>
+          <div class="card overview-item" id="pyCardPath">
+            <div class="overview-label">PATH</div>
+            <div class="overview-value"><span class="state-dot neutral"></span><span data-field="pyPath">待检测</span></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h3>网络连通性（pip 源）</h3>
+                <button id="pyBtnReprobe" class="btn btn-mini">重新测速</button>
+              </div>
+              <div class="net-list" id="pyNetList">
+                <div class="net-row">
+                  <div class="net-name"><span class="state-dot neutral"></span>官方 PyPI</div>
+                  <div class="net-latency mono">-</div>
+                </div>
+                <div class="net-row">
+                  <div class="net-name"><span class="state-dot neutral"></span>清华 TUNA</div>
+                  <div class="net-latency mono">-</div>
+                </div>
+                <div class="net-row">
+                  <div class="net-name"><span class="state-dot neutral"></span>阿里云</div>
+                  <div class="net-latency mono">-</div>
+                </div>
+              </div>
+              <div id="pyForeignList" style="margin-top:10px"></div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h3>一键修复</h3>
+                <span class="hint"></span>
+              </div>
+              <div class="fix-status" id="pyFixStatus"></div>
+              <div class="fix-actions">
+                <button id="pyBtnInstall" class="btn btn-primary btn-block">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke-linecap="round"/></svg>
+                  安装 / 修复 Python
+                </button>
+                <button id="pyBtnFixPath" class="btn btn-ghost btn-block">修复 PATH</button>
+              </div>
+              <div class="progress-area hidden" id="pyProgressArea">
+                <div class="progress-track"><div class="progress-fill" id="pyProgressFill"></div></div>
+                <div class="progress-meta">
+                  <span id="pyProgressText">准备中…</span>
+                  <span id="pyProgressPct" class="mono">0%</span>
+                </div>
+              </div>
+              <div class="install-path mono" id="pyInstallPath"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Python Tab 2: pip 镜像 -->
+      <section class="tab-panel hidden" id="pyPanel2">
+        <div class="card">
+          <div class="card-head">
+            <h3>pip 镜像源</h3>
+          </div>
+          <div class="registry-current">
+            <span class="label">当前 index-url</span>
+            <code id="pyCurrentIndex" class="mono">未设置</code>
+          </div>
+          <div class="source-options" id="pySourceOptions">
+            <label class="source-option">
+              <input type="radio" name="pysource" value="https://pypi.org/simple" />
+              <span class="source-name">官方 PyPI</span>
+              <span class="source-url mono">pypi.org/simple</span>
+            </label>
+            <label class="source-option">
+              <input type="radio" name="pysource" value="https://pypi.tuna.tsinghua.edu.cn/simple" />
+              <span class="source-name">清华 TUNA</span>
+              <span class="source-url mono">pypi.tuna.tsinghua.edu.cn/simple</span>
+            </label>
+            <label class="source-option">
+              <input type="radio" name="pysource" value="https://mirrors.aliyun.com/pypi/simple" />
+              <span class="source-name">阿里云</span>
+              <span class="source-url mono">mirrors.aliyun.com/pypi/simple</span>
+            </label>
+            <label class="source-option">
+              <input type="radio" name="pysource" value="__custom__" />
+              <span class="source-name">自定义</span>
+              <input class="source-custom mono" id="pyCustomIndex" type="text" placeholder="https://your-pypi.com/simple" disabled />
+            </label>
+          </div>
+          <div class="card-actions">
+            <button id="pyBtnTestIndex" class="btn btn-ghost">测试连接</button>
+            <button id="pyBtnApplyIndex" class="btn btn-primary">应用镜像</button>
+            <span id="pyTestBadge" class="test-badge hidden"></span>
+          </div>
+          <div class="result-msg" id="pyMirrorResult"></div>
+        </div>
+      </section>
+
+      <!-- Python Tab 3: Python 版本 -->
+      <section class="tab-panel hidden" id="pyPanel3">
+        <div class="card">
+          <div class="card-head">
+            <h3>Python 版本管理</h3>
+            <div class="version-actions">
+              <span id="pyLauncherBanner" class="nvm-banner hidden"></span>
+              <button id="pyBtnRefreshVersions" class="btn btn-mini btn-ghost">刷新</button>
+            </div>
+          </div>
+          <div class="version-meta">
+            <div class="version-meta-item">
+              <span class="label">当前版本</span>
+              <code id="pyCurrentVersion" class="mono">-</code>
+            </div>
+            <div class="version-meta-item">
+              <span class="label">安装目录</span>
+              <code id="pyInstallDir" class="mono">-</code>
+            </div>
+          </div>
+          <div class="version-sections">
+            <div class="version-section">
+              <div class="section-title">已安装版本</div>
+              <div id="pyInstalledList" class="version-list"></div>
+            </div>
+            <div class="version-section">
+              <div class="section-title">可用版本（每小版本最新）</div>
+              <div id="pyAvailableList" class="version-list"></div>
+            </div>
+          </div>
+          <div class="progress-area hidden" id="pyVersionProgressArea">
+            <div class="progress-track"><div class="progress-fill" id="pyVersionProgressFill"></div></div>
+            <div class="progress-meta">
+              <span id="pyVersionProgressText">准备中…</span>
+              <span id="pyVersionProgressPct" class="mono">0%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Python Tab 4: 包管理器 -->
+      <section class="tab-panel hidden" id="pyPanel4">
+        <div class="card">
+          <div class="card-head">
+            <h3>Python 包管理器</h3>
+            <div class="version-actions">
+              <button id="pyBtnPkgRefresh" class="btn btn-mini btn-ghost">刷新</button>
+            </div>
+          </div>
+          <div class="pkg-list" id="pyPkgList">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Python Tab 5: 项目管理 -->
+      <section class="tab-panel hidden" id="pyPanel5">
+        <div class="card">
+          <div class="card-head">
+            <h3>Python 项目级管理</h3>
+            <div class="version-actions">
+              <button id="pyBtnOpenProject" class="btn btn-mini btn-primary">打开项目目录</button>
+            </div>
+          </div>
+          <div class="fix-status" id="pyProjectStatus">打开一个项目目录，自动解析其 Python 版本要求（.python-version / pyproject.toml / runtime.txt / Pipfile）</div>
+          <div class="project-info" id="pyProjectInfo">
+            <div class="empty">尚未打开项目</div>
+          </div>
+          <div class="card-actions" style="margin-top:12px">
+            <button id="pyBtnApplyProject" class="btn btn-primary">应用项目配置</button>
           </div>
         </div>
       </section>
@@ -362,54 +545,6 @@
             <div id="gitAccountList" class="account-list">
               <div class="empty">暂无 Git 账号</div>
             </div>
-
-            <div id="gitAccountForm" class="account-form hidden">
-              <input type="hidden" id="gitSourceAlias" />
-              <div class="form-row">
-                <div class="form-field">
-                  <label>Host 别名</label>
-                  <input id="gitAlias" type="text" placeholder="github-work" />
-                </div>
-                <div class="form-field">
-                  <label>主机地址</label>
-                  <input id="gitHostName" type="text" placeholder="github.com" />
-                </div>
-                <div class="form-field">
-                  <label>SSH 端口</label>
-                  <input id="gitPort" type="number" min="1" max="65535" value="22" />
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-field">
-                  <label>SSH 用户</label>
-                  <input id="gitSshUser" type="text" value="git" />
-                </div>
-                <div class="form-field">
-                  <label>Git 用户名</label>
-                  <input id="gitName" type="text" placeholder="你的用户名" />
-                </div>
-                <div class="form-field">
-                  <label>Git 邮箱</label>
-                  <input id="gitEmail" type="text" placeholder="you@example.com" />
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-field">
-                  <label>私钥路径（留空自动）</label>
-                  <input id="gitKeyPath" class="mono" type="text" placeholder="C:\Users\you\.ssh\id_rsa_github" />
-                </div>
-                <div class="form-field">
-                  <label style="flex-direction:row;align-items:center;gap:6px;cursor:pointer">
-                    <input type="checkbox" id="gitGenerateKey" checked style="width:auto" />
-                    同时生成 SSH 密钥
-                  </label>
-                </div>
-              </div>
-              <div class="form-actions">
-                <button id="btnGitSave" class="btn btn-primary">保存</button>
-                <button id="btnGitCancel" class="btn btn-ghost">取消</button>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -444,8 +579,8 @@
             <div class="card-actions" style="flex-wrap:wrap">
               <button id="btnGitSwitchGlobal" class="btn btn-ghost">切换全局身份</button>
             </div>
-            <div class="install-path mono" style="margin-top:8px">
-              <input id="gitLocalRepo" class="source-custom mono" placeholder="仓库目录（可选，用于本地身份）" />
+            <div class="fix-status" style="margin-top:8px">
+              切换仓库级身份会写入该仓库的 .git/config（local 作用域），不影响全局配置。
             </div>
             <div class="card-actions" style="margin-top:8px">
               <button id="btnGitSwitchLocal" class="btn btn-ghost">切换仓库级身份</button>
@@ -460,12 +595,8 @@
               <h3>仓库同步</h3>
               <span class="hint">git pull --ff-only</span>
             </div>
-            <div class="card-actions" style="flex-wrap:wrap">
-              <input id="gitRepoPath" class="source-custom mono" placeholder="仓库目录路径" />
-              <button id="btnGitPickRepo" class="btn btn-ghost">选择目录</button>
-            </div>
-            <div class="card-actions" style="margin-top:8px">
-              <button id="btnGitSyncRepo" class="btn btn-primary">同步仓库</button>
+            <div class="card-actions">
+              <button id="btnGitSyncRepo" class="btn btn-primary">选择仓库并同步</button>
             </div>
             <div class="result-msg" id="gitSyncResult"></div>
           </div>
@@ -488,15 +619,15 @@
     </main>
   </div>
 
-  <!-- ================= 确认弹窗 ================= -->
+  <!-- ================= 统一弹窗（确认 / 表单） ================= -->
   <div class="modal-backdrop hidden" id="modalBackdrop">
-    <div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-title" id="modalTitle">确认操作</div>
-      <div class="modal-body mono" id="modalBody"></div>
-      <div class="modal-actions">
-        <button class="btn btn-ghost" id="modalCancel">取消</button>
-        <button class="btn btn-danger" id="modalConfirm">确认执行</button>
+    <div class="modal" id="modalBox" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div class="modal-title" id="modalTitle">确认操作</div>
+        <button class="modal-close" id="modalClose" title="关闭" aria-label="关闭">✕</button>
       </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-actions" id="modalActions"></div>
     </div>
   </div>
 

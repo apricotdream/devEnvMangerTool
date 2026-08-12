@@ -159,6 +159,67 @@
       return { reachable: true, status: 200, latencyMs: 42, throughputKbs: 1800, needsAuth: false, authUser: "admin", error: null };
     },
 
+    /* ---------------- 证书信任 ---------------- */
+
+    async probeCert(registry) {
+      if (IS_TAURI) return _invoke("probe_cert", { registry });
+      await _delay(300);
+      return {
+        host: "192.168.3.8",
+        port: 181,
+        subject: "CN=192.168.3.8",
+        issuer: "CN=192.168.3.8",
+        selfSigned: true,
+        sha256: "MOCKFINGERPRINT000000000000000000000000000000000000000000000000",
+        pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----",
+        error: null,
+      };
+    },
+
+    async acceptCert(registry) {
+      if (IS_TAURI) return _invoke("accept_cert", { registry });
+      await _delay(300);
+      return { host: "mock", port: 181, selfSigned: true, sha256: "mock", pem: "", error: null };
+    },
+
+    async listTrustedCerts() {
+      if (IS_TAURI) return _invoke("list_trusted_certs");
+      await _delay(150);
+      return { certs: [] };
+    },
+
+    async removeTrustedCert(host, port) {
+      if (IS_TAURI) return _invoke("remove_trusted_cert", { host, port });
+      await _delay(150);
+      return { certs: [] };
+    },
+
+    /* ---------------- 包发布 ---------------- */
+
+    async listPublishPackages(projectDir) {
+      if (IS_TAURI) return _invoke("list_publish_packages", { projectDir });
+      await _delay(250);
+      return [];
+    },
+
+    async checkRegistryPackage(registry, name) {
+      if (IS_TAURI) return _invoke("check_registry_package", { registry, name });
+      await _delay(200);
+      return { exists: false, versions: [], error: null };
+    },
+
+    async publishPackages(packages, registry, build) {
+      if (IS_TAURI) return _invoke("publish_packages", { packages, registry, build });
+      await _delay(600);
+      return packages.map((d) => ({ name: d, version: "0.0.0", ok: true, message: "模拟发布成功" }));
+    },
+
+    async checkNodeExtraCa() {
+      if (IS_TAURI) return _invoke("check_node_extra_ca");
+      await _delay(100);
+      return { allPemExists: false, envSet: false, envMatches: false };
+    },
+
     /* ---------------- 版本 ---------------- */
 
     async listVersions() {
@@ -369,6 +430,137 @@
       if (IS_TAURI) return _invoke("apply_project", { path });
       await _delay(500);
       return "已应用项目配置（模拟）";
+    },
+
+    /* ---------------- Python ---------------- */
+
+    async detectPython() {
+      if (IS_TAURI) return _invoke("detect_python");
+      await _delay(650);
+      return {
+        installed: true,
+        storeStub: false,
+        realPythonExe: "C:\\Python312\\python.exe",
+        pythonVersion: "3.12.4",
+        pipVersion: "pip 24.0",
+        inPath: true,
+        pythonDirInPath: "C:\\Python312",
+        foreign: [],
+        network: [
+          { name: "官方 PyPI", url: "https://pypi.org/simple/", ok: true, latencyMs: 263 },
+          { name: "清华 TUNA", url: "https://pypi.tuna.tsinghua.edu.cn/simple/", ok: true, latencyMs: 529 },
+          { name: "阿里云", url: "https://mirrors.aliyun.com/pypi/simple/", ok: true, latencyMs: 64 },
+        ],
+      };
+    },
+
+    async readPipIndex() {
+      if (IS_TAURI) return _invoke("read_pip_index");
+      await _delay(120);
+      return "https://pypi.tuna.tsinghua.edu.cn/simple";
+    },
+
+    async setPipIndex(url) {
+      if (IS_TAURI) return _invoke("set_pip_index", { url });
+      await _delay(300);
+      return { ok: true, path: "%APPDATA%\\pip\\pip.ini" };
+    },
+
+    async testPypi(url) {
+      if (IS_TAURI) return _invoke("test_pypi", { url });
+      await _delay(600);
+      return { reachable: true, status: 200, latencyMs: 68, throughputKbs: 412.5, needsAuth: false, error: null };
+    },
+
+    async listPythonVersions() {
+      if (IS_TAURI) return _invoke("list_python_versions");
+      await _delay(200);
+      return {
+        pyLauncherDetected: false,
+        installDir: "C:\\Users\\dev\\AppData\\Local\\Programs\\python",
+        installed: [
+          { version: "3.12.4", current: true, sizeMb: 112 },
+          { version: "3.11.9", current: false, sizeMb: 108 },
+        ],
+        available: ["3.14.7", "3.13.15", "3.12.13", "3.11.15", "3.10.20"],
+        current: "3.12.4",
+      };
+    },
+
+    async installPythonVersion(version, { onProgress } = {}) {
+      if (IS_TAURI) {
+        let unlisten;
+        try {
+          unlisten = await window.__TAURI__.event.listen("python-version-progress", (e) => {
+            onProgress?.(e.payload?.stage);
+          });
+        } catch (_e) { /* 忽略监听失败 */ }
+        try {
+          return await _invoke("install_python_version", { version });
+        } finally {
+          unlisten?.();
+        }
+      }
+      onProgress?.("downloading");
+      await _delay(500);
+      onProgress?.("extracting");
+      await _delay(400);
+      onProgress?.("done");
+      return { ok: true, version, dir: "C:\\Users\\dev\\AppData\\Local\\Programs\\python\\" + version };
+    },
+
+    async switchPythonVersion(version) {
+      if (IS_TAURI) return _invoke("switch_python_version", { version });
+      await _delay(300);
+      return "C:\\Users\\dev\\AppData\\Local\\Programs\\python\\" + version;
+    },
+
+    async uninstallPythonVersion(version) {
+      if (IS_TAURI) return _invoke("uninstall_python_version", { version });
+      await _delay(300);
+      return "C:\\Users\\dev\\AppData\\Local\\Programs\\python\\" + version;
+    },
+
+    async listPythonPkgManagers() {
+      if (IS_TAURI) return _invoke("list_python_pkg_managers");
+      await _delay(200);
+      return [
+        { name: "pip", installed: true, version: "24.0", binPath: "python -m pip", dataDir: "C:\\Users\\dev\\AppData\\Local\\pip\\cache" },
+        { name: "uv", installed: false, version: null, binPath: null, dataDir: "C:\\Users\\dev\\AppData\\Local\\uv" },
+        { name: "poetry", installed: true, version: "1.8.3", binPath: "C:\\...\\poetry.exe", dataDir: "C:\\Users\\dev\\AppData\\Roaming\\pypoetry" },
+        { name: "pipenv", installed: false, version: null, binPath: null, dataDir: "C:\\Users\\dev\\AppData\\Local\\pipenv" },
+        { name: "conda", installed: false, version: null, binPath: null, dataDir: "C:\\Users\\dev\\miniconda3" },
+      ];
+    },
+
+    async installPythonPkgManager(name, version) {
+      if (IS_TAURI) return _invoke("install_python_pkg_manager", { name, version });
+      await _delay(800);
+      return `${name} 已安装（模拟）`;
+    },
+
+    async inspectPythonProject(path) {
+      if (IS_TAURI) return _invoke("inspect_python_project", { path });
+      await _delay(300);
+      return {
+        path,
+        pythonRequirement: "3.12.4",
+        requirementSource: ".python-version",
+        pkgTool: "uv",
+        index: null,
+        hasPythonVersionFile: true,
+        hasPyprojectToml: true,
+        hasRuntimeTxt: false,
+        hasPipfile: false,
+        currentPython: "3.14.5",
+        pythonInstalled: false,
+      };
+    },
+
+    async applyPythonProject(path) {
+      if (IS_TAURI) return _invoke("apply_python_project", { path });
+      await _delay(500);
+      return "已应用 Python 项目配置（模拟）";
     },
   };
 })();
