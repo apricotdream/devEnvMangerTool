@@ -32,11 +32,13 @@
     modalBody: $("#modalBody"),
     modalActions: $("#modalActions"),
     modalClose: $("#modalClose"),
+    fullscreenLoading: $("#fullscreenLoading"),
     envTag: $("#envTag"),
     tabBar: $("#tabBar"),
     gitTabBar: $("#gitTabBar"),
     btnTheme: $("#btnTheme"),
     themeIcon: $("#themeIcon"),
+    btnOpenConfig: $("#btnOpenConfig"),
     btnTestRegistry: $("#btnTestRegistry"),
     testBadge: $("#testBadge"),
     // 版本 Tab
@@ -158,6 +160,24 @@
     return String(s).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     })[c]);
+  }
+
+  /* 按钮加载态：显示旋转圈 + 可选替换文字，结束时恢复原文字并解禁。 */
+  function setBtnLoading(btn, loading, text) {
+    if (!btn) return;
+    if (loading) {
+      if (!btn.dataset.origText) btn.dataset.origText = btn.textContent;
+      btn.classList.add("is-loading");
+      btn.disabled = true;
+      if (text) btn.textContent = text;
+    } else {
+      btn.classList.remove("is-loading");
+      btn.disabled = false;
+      if (btn.dataset.origText) {
+        btn.textContent = btn.dataset.origText;
+        delete btn.dataset.origText;
+      }
+    }
   }
 
   /* ---------------- 状态渲染 ---------------- */
@@ -296,7 +316,7 @@
     }
 
     busy = true;
-    els.btnApplyMirror.disabled = true;
+    setBtnLoading(els.btnApplyMirror, true, "切换中…");
     const result = $("#mirrorResult");
     result.textContent = "切换中…";
     try {
@@ -317,7 +337,7 @@
       log("err", `切换镜像失败: ${e.message}`);
     } finally {
       busy = false;
-      els.btnApplyMirror.disabled = false;
+      setBtnLoading(els.btnApplyMirror, false);
       setTimeout(() => { result.textContent = ""; }, 3000);
     }
   }
@@ -393,7 +413,7 @@
       return;
     }
     busy = true;
-    els.btnTestRegistry.disabled = true;
+    setBtnLoading(els.btnTestRegistry, true, "测试中…");
     const badge = els.testBadge;
     badge.classList.remove("hidden");
     badge.className = "test-badge pending";
@@ -405,7 +425,7 @@
         const accepted = await handleCertIssue(url);
         if (accepted) {
           busy = false;
-          els.btnTestRegistry.disabled = false;
+          setBtnLoading(els.btnTestRegistry, false);
           badge.textContent = "已信任证书，重新测试…";
           return testConnection();
         }
@@ -438,7 +458,7 @@
       log("err", `测试连接失败: ${e.message}`);
     } finally {
       busy = false;
-      els.btnTestRegistry.disabled = false;
+      setBtnLoading(els.btnTestRegistry, false);
     }
   }
 
@@ -480,10 +500,12 @@
     $$(".tab-panel").forEach((p) => p.classList.add("hidden"));
     $("#tabPanel" + n).classList.remove("hidden");
     if (n == 3) loadVersions();
-    if (n == 4) loadAccounts();
     if (n == 6) loadPkgManagers();
     if (n == 7) loadProject();
-    if (n == 8) loadPubTab();
+    if (n == 8) {
+      loadAccounts();
+      loadPubTab();
+    }
   }
 
   function bindTabs() {
@@ -538,6 +560,7 @@
   /* ---------------- Node 版本 Tab ---------------- */
 
   async function loadVersions() {
+    setBtnLoading(els.btnRefreshVersions, true, "刷新中…");
     try {
       const info = await window.Backend.listVersions();
       const banner = els.nvmBanner;
@@ -555,6 +578,8 @@
       renderAvailableVersions(info.available || []);
     } catch (e) {
       log("err", `加载版本信息失败: ${e.message}`);
+    } finally {
+      setBtnLoading(els.btnRefreshVersions, false);
     }
   }
 
@@ -780,6 +805,7 @@
       await window.Backend.switchAccount(id);
       log("info", `已切换到账号「${acc?.name}」`);
       loadAccounts();
+      populatePubAccounts();
       refreshRegistry();
     } catch (err) {
       log("err", `切换账号失败: ${err}`);
@@ -787,6 +813,8 @@
   }
 
   async function testAccount(acc, id) {
+    const btn = document.querySelector(`button[data-act="test"][data-id="${id}"]`);
+    setBtnLoading(btn, true, "测试中…");
     try {
       const res = await window.Backend.testAccount(id);
       if (res.certIssue && acc?.registry) {
@@ -799,12 +827,19 @@
         : res.needsAuth
           ? " · 需认证"
           : "";
+      // npmjs 官方：whoami 只验证身份，不代表可发布；发布还需过 2FA（输 OTP）或 bypass-2FA token。
+      const npmjsNote =
+        acc?.registry && /registry\.npmjs\.org/i.test(acc.registry)
+          ? "（认证≠可发布，npmjs 发布需 2FA/OTP 或 bypass-2FA token）"
+          : "";
       const text = res.reachable
-        ? `可达 · ${res.latencyMs}ms${kbs}${authPart}`
+        ? `可达 · ${res.latencyMs}ms${kbs}${authPart}${npmjsNote}`
         : `不可达 · ${res.error || ""}`;
       log("info", `账号「${acc?.name}」测试: ${text}`);
     } catch (err) {
       log("err", `账号测试失败: ${err}`);
+    } finally {
+      setBtnLoading(btn, false);
     }
   }
 
@@ -815,6 +850,7 @@
       await window.Backend.deleteAccount(id);
       log("info", `已删除账号「${acc?.name}」`);
       loadAccounts();
+      populatePubAccounts();
     } catch (err) {
       log("err", `删除账号失败: ${err}`);
     }
@@ -829,6 +865,20 @@
           key: "registry", label: "Registry 地址", type: "text", required: true,
           placeholder: "https://192.168.3.8:8980/repository/npm-group/",
           pattern: /^https?:\/\/.+/, patternMsg: "需以 http(s):// 开头",
+        },
+        {
+          key: "npmjsNote", type: "note",
+          html: (v) => {
+            const reg = String(v.registry || "").toLowerCase().replace(/\/+$/, "");
+            const isNpmjs = reg === "https://registry.npmjs.org"
+              || reg === "http://registry.npmjs.org"
+              || reg.includes("//registry.npmjs.org");
+            if (!isNpmjs) return "";
+            if (v.authType === "basic") {
+              return "⚠️ npmjs 官方<b>不接受 basic 认证</b>（用户名+密码），发布必失败。请改选 <b>Token</b>。";
+            }
+            return "npmjs 官方只认 <b>token</b>。还没有？<a href=\"https://www.npmjs.com/settings/apricotdream/tokens\" target=\"_blank\" rel=\"noopener\">去 npmjs 创建 token</a>（选 Publish 作用域，发布免 OTP）";
+          },
         },
         {
           key: "authType", label: "认证类型", type: "select", defaultValue: "token",
@@ -880,8 +930,10 @@
           projectDir,
         };
         await window.Backend.saveAccount(account);
-        log("info", `账号「${account.name}」已保存`);
+        const synced = els.accountsData?.active === account.id;
+        log("info", `账号「${account.name}」已保存${synced ? "，凭据已同步写入 .npmrc" : ""}`);
         loadAccounts();
+        populatePubAccounts();
       },
     });
   }
@@ -1337,7 +1389,83 @@
       `<div class="pkg-version mono">${escapeHtml(info.registry || "未指定（使用全局）")}</div>` +
       `<div class="pkg-meta">来源: 项目 ${info.hasNpmrc ? ".npmrc" : "（无项目 .npmrc）"}</div>` +
       `</div></div>`;
+
+    // 项目配置文件：列出现有文件并提供编辑入口
+    const files = [];
+    if (info.hasNvmrc) files.push([".nvmrc", "Node 版本要求"]);
+    if (info.hasPackageJson) files.push(["package.json", "依赖 / engines / packageManager"]);
+    if (info.hasNpmrc) files.push([".npmrc", "registry 等 npm 配置"]);
+    if (files.length) {
+      html += `<div class="file-section-title">项目配置文件</div>`;
+      for (const [name, desc] of files) {
+        html +=
+          `<div class="pkg-item file-row"><span class="pkg-name">${escapeHtml(name)}</span>` +
+          `<div class="pkg-body"><div class="pkg-meta">${escapeHtml(desc)}</div></div>` +
+          `<div class="pkg-actions"><button class="btn btn-mini" data-edit-file="${escapeHtml(name)}">编辑</button></div>` +
+          `</div>`;
+      }
+    }
+
     box.innerHTML = html;
+    box.querySelectorAll("[data-edit-file]").forEach((btn) => {
+      btn.addEventListener("click", () => editProjectFile(btn.dataset.editFile));
+    });
+  }
+
+  /* 打开项目配置文件编辑弹窗：读取 → 编辑 → 保存后重新解析项目 */
+  function editProjectFile(name) {
+    const path = els._projectPath;
+    if (!path) return;
+    modalState = { kind: "confirm", resolve: () => {} };
+    openModal({ title: `编辑 ${name}`, width: "form" });
+    els.modalBody.innerHTML = "";
+
+    const wrap = document.createElement("div");
+    wrap.className = "file-editor";
+    const hint = document.createElement("div");
+    hint.className = "modal-hint";
+    hint.textContent = `${path}\\${name}`;
+    const ta = document.createElement("textarea");
+    ta.className = "file-editor-ta mono";
+    ta.value = "加载中…";
+    ta.spellcheck = false;
+    ta.disabled = true;
+    wrap.appendChild(hint);
+    wrap.appendChild(ta);
+    els.modalBody.appendChild(wrap);
+
+    const save = async () => {
+      try {
+        await Backend.writeProjectFile(path, name, ta.value);
+        closeModal();
+        log("info", `已保存 ${name}`);
+        inspectProject(path);
+      } catch (e) {
+        log("err", `保存 ${name} 失败: ${e}`);
+      }
+    };
+    renderActions([
+      { text: "取消", cls: "btn-ghost", onClick: closeModal },
+      { text: "保存", cls: "btn-primary", onClick: save },
+    ]);
+    ta.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        save();
+      }
+    });
+
+    Backend.readProjectFile(path, name)
+      .then((content) => {
+        ta.value = content;
+        ta.disabled = false;
+        ta.focus();
+      })
+      .catch((e) => {
+        log("err", `读取 ${name} 失败: ${e}`);
+        ta.value = "";
+        ta.disabled = false;
+      });
   }
 
   async function applyProject() {
@@ -1424,6 +1552,8 @@
       log("warn", "请先打开项目目录");
       return;
     }
+    setBtnLoading(els.btnPubScan, true, "扫描中…");
+    els.pubStatus.classList.add("status-loading");
     els.pubStatus.textContent = `正在扫描 ${path} …`;
     els.pubPackageList.innerHTML = '<div class="empty">扫描中…</div>';
     try {
@@ -1434,6 +1564,9 @@
     } catch (e) {
       els.pubStatus.textContent = `扫描失败: ${e.message}`;
       els.pubPackageList.innerHTML = '<div class="empty">扫描失败</div>';
+    } finally {
+      setBtnLoading(els.btnPubScan, false);
+      els.pubStatus.classList.remove("status-loading");
     }
   }
 
@@ -1481,16 +1614,33 @@
       "发布",
     );
     if (!ok) return;
-    els.btnPubPublish.disabled = true;
+    setBtnLoading(els.btnPubPublish, true, "发布中…");
+    els.pubStatus.classList.add("status-loading");
     els.pubStatus.textContent = `发布中（${selected.length} 个包）…`;
     try {
-      const results = await window.Backend.publishPackages(selected.map((p) => p.dir), registry, build);
+      const dirs = selected.map((p) => p.dir);
+      let results = await window.Backend.publishPackages(dirs, registry, build, null);
+      // 账号 2FA：若 npm 报 EOTP，提示输入一次性验证码并带 OTP 重发失败的包
+      if (results.some((r) => r.needsOtp)) {
+        const otp = await promptInputModal(
+          "需要一次性验证码（2FA）",
+          "该账号启用了两步验证。请在手机验证器查看 6 位验证码并输入。\n若输入后仍失败，可改用 bypass-2FA 的 Automation token（详见结果区提示）。",
+          "6 位验证码",
+          { text: "如何在验证器查看 OTP（npmjs 2FA 说明）", url: "https://go.npm.me/2fa-guide" },
+        );
+        if (otp) {
+          els.pubStatus.textContent = `重新发布（带 OTP）…`;
+          const failedDirs = dirs.filter((_, i) => !results[i].ok);
+          results = await window.Backend.publishPackages(failedDirs, registry, build, otp);
+        }
+      }
       renderPubResults(results);
     } catch (e) {
       els.pubStatus.textContent = `发布失败: ${e.message}`;
       log("err", `发布失败: ${e.message}`);
     } finally {
-      els.btnPubPublish.disabled = false;
+      setBtnLoading(els.btnPubPublish, false);
+      els.pubStatus.classList.remove("status-loading");
     }
   }
 
@@ -1501,10 +1651,16 @@
     const html = results.map((r) => {
       const badge = r.ok
         ? `<span class="pub-tag ok">✓ 成功</span>`
-        : `<span class="pub-tag priv">✗ 失败</span>`;
+        : r.needsOtp
+          ? `<span class="pub-tag priv">需验证码</span>`
+          : `<span class="pub-tag priv">✗ 失败</span>`;
+      const hintHtml = r.hint
+        ? `<div class="pub-hint"><a href="${escapeHtml(r.hint.url)}" target="_blank" rel="noopener">${escapeHtml(r.hint.text)}</a></div>`
+        : "";
       return `<div class="pub-result ${r.ok ? "pub-result-ok" : "pub-result-err"}">` +
         `<div class="pub-result-head">${badge} <span class="pub-pkg-name mono">${escapeHtml(r.name)}</span></div>` +
         `<div class="pub-result-msg">${escapeHtml(r.message)}</div>` +
+        `${hintHtml}` +
         `</div>`;
     }).join("");
     box.innerHTML = html;
@@ -1642,7 +1798,7 @@
       return;
     }
     busy = true;
-    els.pyBtnApplyIndex.disabled = true;
+    setBtnLoading(els.pyBtnApplyIndex, true, "切换中…");
     const result = els.pyMirrorResult;
     result.textContent = "切换中…";
     try {
@@ -1663,7 +1819,7 @@
       log("err", `切换 pip 镜像失败: ${e.message}`);
     } finally {
       busy = false;
-      els.pyBtnApplyIndex.disabled = false;
+      setBtnLoading(els.pyBtnApplyIndex, false);
       setTimeout(() => { result.textContent = ""; }, 3000);
     }
   }
@@ -1676,7 +1832,7 @@
       return;
     }
     busy = true;
-    els.pyBtnTestIndex.disabled = true;
+    setBtnLoading(els.pyBtnTestIndex, true, "测试中…");
     const badge = els.pyTestBadge;
     badge.classList.remove("hidden");
     badge.className = "test-badge pending";
@@ -1706,13 +1862,14 @@
       log("err", `测试 pip 源失败: ${e.message}`);
     } finally {
       busy = false;
-      els.pyBtnTestIndex.disabled = false;
+      setBtnLoading(els.pyBtnTestIndex, false);
     }
   }
 
   /* ---- Python 版本 ---- */
 
   async function loadPythonVersions() {
+    setBtnLoading(els.pyBtnRefreshVersions, true, "刷新中…");
     try {
       const info = await window.Backend.listPythonVersions();
       const banner = els.pyLauncherBanner;
@@ -1728,6 +1885,8 @@
       renderPyAvailable(info.available || []);
     } catch (e) {
       log("err", `加载 Python 版本信息失败: ${e.message}`);
+    } finally {
+      setBtnLoading(els.pyBtnRefreshVersions, false);
     }
   }
 
@@ -2094,6 +2253,106 @@
     });
   }
 
+  // 带单行输入框的弹窗：返回输入值（取消返回 null）。link 可选 {text,url}，显示为辅助链接。
+  function promptInputModal(title, message, placeholder = "", link = null) {
+    return new Promise((resolve) => {
+      modalState = { kind: "confirm", resolve };
+      openModal({ title, width: "confirm" });
+      els.modalBody.innerHTML = "";
+      const wrap = document.createElement("div");
+      wrap.className = "modal-body--confirm";
+      const msg = document.createElement("div");
+      msg.style.marginBottom = "10px";
+      msg.style.whiteSpace = "pre-wrap";
+      msg.textContent = message;
+      wrap.appendChild(msg);
+      if (link && link.url) {
+        const a = document.createElement("a");
+        a.href = link.url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.className = "modal-link";
+        a.textContent = link.text || link.url;
+        wrap.appendChild(a);
+      }
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "source-custom mono";
+      input.placeholder = placeholder;
+      input.style.width = "100%";
+      wrap.appendChild(input);
+      els.modalBody.appendChild(wrap);
+      const finish = (val) => { closeModal(); resolve(val); };
+      renderActions([
+        { text: "取消", cls: "btn-ghost", onClick: () => finish(null) },
+        { text: "确定", cls: "btn-primary", onClick: () => finish(input.value.trim()) },
+      ]);
+      input.focus();
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") finish(input.value.trim()); });
+    });
+  }
+
+  /* ---- 打开配置文件目录 ---- */
+
+  function openOneConfigDir(d) {
+    if (!d.exists) return;
+    // select=true：文件（.npmrc/pip.ini/.gitconfig）在资源管理器中高亮；目录则正常打开
+    Backend.gitOpenInManager(d.path, true).catch((e) => log("err", `打开失败 ${d.path}: ${e}`));
+  }
+
+  async function openConfigDirs() {
+    let dirs;
+    try {
+      dirs = await Backend.listConfigDirs();
+    } catch (e) {
+      log("err", `读取配置目录失败: ${e}`);
+      return;
+    }
+    modalState = { kind: "confirm", resolve: () => {} };
+    openModal({ title: "配置文件目录", width: "confirm" });
+    els.modalBody.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "config-dirs";
+    const list = document.createElement("div");
+    list.className = "config-dir-list";
+    for (const d of dirs) {
+      const row = document.createElement("div");
+      row.className = "config-dir-row" + (d.exists ? "" : " missing");
+      const info = document.createElement("div");
+      info.className = "config-dir-info";
+      const name = document.createElement("div");
+      name.className = "config-dir-name";
+      name.textContent = d.name + (d.exists ? "" : "（不存在）");
+      const path = document.createElement("div");
+      path.className = "config-dir-path mono";
+      path.textContent = d.path;
+      path.title = d.path;
+      info.appendChild(name);
+      info.appendChild(path);
+      const btn = document.createElement("button");
+      btn.className = "btn btn-mini";
+      btn.textContent = "打开";
+      btn.disabled = !d.exists;
+      btn.addEventListener("click", () => openOneConfigDir(d));
+      row.appendChild(info);
+      row.appendChild(btn);
+      list.appendChild(row);
+    }
+    wrap.appendChild(list);
+    els.modalBody.appendChild(wrap);
+    renderActions([
+      {
+        text: "全部打开",
+        cls: "btn-primary",
+        disabled: !dirs.some((d) => d.exists),
+        onClick: () => {
+          for (const d of dirs) openOneConfigDir(d);
+        },
+      },
+      { text: "关闭", cls: "btn-ghost", onClick: closeModal },
+    ]);
+  }
+
   /* ---- 通用表单弹窗（schema 驱动） ---- */
 
   function openFormModal({ title, hint, fields, initial, submitText, onSubmit, width = "form" }) {
@@ -2175,6 +2434,13 @@
       wrapper.className = "form-field";
       wrapper.dataset.fieldKey = f.key;
 
+      if (f.type === "note") {
+        const note = document.createElement("div");
+        note.className = "form-note";
+        note.dataset.noteFor = f.key;
+        wrapper.appendChild(note);
+        return wrapper;
+      }
       if (f.type === "checkbox") {
         const chkLabel = document.createElement("label");
         chkLabel.className = "chk-label";
@@ -2281,6 +2547,14 @@
 
     function updateFormVisibility() {
       for (const f of fields) {
+        if (f.type === "note") {
+          const note = els.modalBody.querySelector(`[data-note-for="${f.key}"]`);
+          if (!note) continue;
+          const html = f.html ? f.html(values) : "";
+          note.innerHTML = html;
+          note.classList.toggle("hidden", !html);
+          continue;
+        }
         if (!f.visibleWhen) continue;
         const wrapper = els.modalBody.querySelector(`[data-field-key="${f.key}"]`);
         if (!wrapper) continue;
@@ -2303,7 +2577,7 @@
     function validate() {
       const errors = {};
       for (const f of fields) {
-        if (f.type === "checkbox") continue;
+        if (f.type === "checkbox" || f.type === "note") continue;
         if (f.visibleWhen && !f.visibleWhen(values)) continue;
         const v = values[f.key];
         if (f.required && (v === "" || v == null)) { errors[f.key] = "此项必填"; continue; }
@@ -2464,6 +2738,7 @@
     els.btnInstall.addEventListener("click", handleInstall);
     els.btnFixPath.addEventListener("click", handleFixPath);
     els.btnTheme.addEventListener("click", toggleTheme);
+    els.btnOpenConfig.addEventListener("click", openConfigDirs);
 
     // 版本 Tab
     els.btnRefreshVersions.addEventListener("click", loadVersions);
@@ -2602,7 +2877,16 @@
       els.envTag.textContent = "模拟数据";
       log("info", "EnvManager 前端预览版启动（模拟数据）");
     }
-    await runDetect(false);
+
+    // 启动加载：全屏遮罩，至少展示 400ms，避免模拟模式一闪而过
+    const loadStart = performance.now();
+    els.fullscreenLoading?.classList.remove("hidden");
+    try {
+      await runDetect(false);
+    } finally {
+      const remain = Math.max(0, 400 - (performance.now() - loadStart));
+      setTimeout(() => els.fullscreenLoading?.classList.add("hidden"), remain);
+    }
   }
 
   document.addEventListener("DOMContentLoaded", init);
