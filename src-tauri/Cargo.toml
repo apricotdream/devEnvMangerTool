@@ -1,6 +1,6 @@
 [package]
 name = "dev-env-manager"
-version = "0.1.0"
+version = "0.2.0-beta"
 description = "开发环境管理工具 (Tauri)"
 authors = ["DevEnvManager"]
 edition = "2021"

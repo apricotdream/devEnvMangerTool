@@ -5,7 +5,7 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod git_cmds;
@@ -663,6 +663,29 @@ fn credential_line(account: &Account) -> String {
     }
 }
 
+/// 检查发布目标 registry 是否已有可用的 .npmrc 凭据（用户级 + 发布目录级）。
+/// npmjs 官方只认 token（`_authToken`），basic（`_auth`）会被拒，因此对 npmjs 只认 token 行。
+fn has_registry_credential(registry: &str, dir: &str) -> bool {
+    let key = npmrc_key(registry);
+    let is_npmjs = registry.contains("npmjs.org");
+    let paths = vec![user_npmrc_path(), format!("{}/.npmrc", dir)];
+    for p in paths {
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            for line in content.lines() {
+                let l = line.trim_start();
+                if l.starts_with(&key) {
+                    let is_token = l.contains("_authToken=");
+                    let is_basic = l.contains("_auth=");
+                    if is_token || (!is_npmjs && is_basic) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// 账号凭据应写入/读取的 .npmrc 路径：项目级账号写项目文件，否则写全局。
 fn npmrc_path_for(account: &Account) -> String {
     match account.project_dir.as_deref() {
@@ -1138,6 +1161,14 @@ pub struct RegistryPackageCheck {
     pub error: Option<String>,
 }
 
+/// 发布失败时的操作提示（前端渲染为可点击链接）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishHint {
+    pub text: String,
+    pub url: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishResult {
@@ -1145,6 +1176,12 @@ pub struct PublishResult {
     pub version: String,
     pub ok: bool,
     pub message: String,
+    /// 发布因账号 2FA 需要一次性验证码（EOTP），前端应提示输入 OTP 后重试。
+    #[serde(default)]
+    pub needs_otp: bool,
+    /// 可选操作提示（渲染为链接），如 npmjs 403 需要 bypass-2FA token。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<PublishHint>,
 }
 
 #[derive(Serialize)]
@@ -1312,17 +1349,37 @@ fn run_npm_in(dir: &str, args: &[&str]) -> (i32, String) {
     }
 }
 
+/// 从版本号派生发布 dist-tag：预发布版本（如 `0.9.0-beta.2` → `beta`）取 prerelease
+/// 标识符第一段；稳定版返回 `None`（用 npm 默认的 `latest`）。
+fn prerelease_tag(version: &str) -> Option<String> {
+    let pre = version.split_once('-')?.1.split('+').next()?;
+    let tag = pre.split('.').next().unwrap_or(pre).trim();
+    if tag.is_empty() {
+        None
+    } else {
+        Some(tag.to_string())
+    }
+}
+
 /// 批量发布：每个包 撞车预检 → （可选）构建 → npm publish。
+/// `otp`：一次性验证码（账号 2FA 需要时由前端提示输入后带上重试）。
 #[tauri::command]
 fn publish_packages(
     packages: Vec<String>,
     registry: String,
     build: bool,
+    otp: Option<String>,
 ) -> Result<Vec<PublishResult>, String> {
     let reg = registry.trim().to_string();
     if reg.is_empty() {
         return Err("请填写发布源 registry".to_string());
     }
+    let is_npmjs = reg.contains("npmjs.org");
+    let otp_arg = otp
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let mut results = Vec::new();
     for dir in &packages {
         let pj = Path::new(dir).join("package.json");
@@ -1337,6 +1394,23 @@ fn publish_packages(
             format!("{}@{}", name, version)
         };
 
+        // 0) npmjs 凭据预检：官方只认 token，无凭据时给可执行的提示
+        if is_npmjs && !has_registry_credential(&reg, dir) {
+            results.push(PublishResult {
+                name: display,
+                version: version.clone(),
+                ok: false,
+                needs_otp: false,
+                message: "未检测到 npmjs 凭据。发布到 npmjs 官方需要 token：\n\
+                    1. 「上传登录」页新建/编辑 npmjs 账号（认证类型 Token，registry=https://registry.npmjs.org）\n\
+                    2. 保存后在该账号点「切换」，把 _authToken 写入 ~/.npmrc\n\
+                    或直接执行：npm login --registry=https://registry.npmjs.org/"
+                    .to_string(),
+                hint: None,
+            });
+            continue;
+        }
+
         // 1) 版本撞车预检
         let check = check_registry_package(reg.clone(), name.clone());
         if let Some(e) = &check.error {
@@ -1344,7 +1418,9 @@ fn publish_packages(
                 name: display,
                 version: version.clone(),
                 ok: false,
+                needs_otp: false,
                 message: format!("预检失败: {}", e),
+                hint: None,
             });
             continue;
         }
@@ -1353,7 +1429,9 @@ fn publish_packages(
                 name: display,
                 version: version.clone(),
                 ok: false,
+                needs_otp: false,
                 message: "版本已存在，跳过（撞车）".to_string(),
+                hint: None,
             });
             continue;
         }
@@ -1366,20 +1444,32 @@ fn publish_packages(
                     name: display,
                     version: version.clone(),
                     ok: false,
+                    needs_otp: false,
                     message: format!("构建失败:\n{}", out),
+                    hint: None,
                 });
                 continue;
             }
         }
 
         // 3) 发布
-        let npm_args: Vec<String> = vec![
+        // 预发布版本（如 0.9.0-beta）必须显式指定 dist-tag，否则 npm 拒绝发布到默认 latest。
+        let pub_tag = prerelease_tag(&version);
+        let mut npm_args: Vec<String> = vec![
             "publish".into(),
             "--registry".into(),
             reg.clone(),
             "--fetch-retries".into(),
             "0".into(),
         ];
+        if let Some(tag) = &pub_tag {
+            npm_args.push("--tag".into());
+            npm_args.push(tag.clone());
+        }
+        if let Some(otp) = &otp_arg {
+            npm_args.push("--otp".into());
+            npm_args.push(otp.clone());
+        }
         let arg_refs: Vec<&str> = npm_args.iter().map(|s| s.as_str()).collect();
         let (code, out) = run_npm_in(dir, &arg_refs);
         if code == 0 {
@@ -1387,14 +1477,50 @@ fn publish_packages(
                 name: display,
                 version,
                 ok: true,
-                message: "发布成功".to_string(),
+                needs_otp: false,
+                message: match &pub_tag {
+                    Some(t) => format!("发布成功（tag: {}）", t),
+                    None => "发布成功".to_string(),
+                },
+                hint: None,
             });
         } else {
+            let lower = out.to_lowercase();
+            let eotp = lower.contains("eotp") || lower.contains("one-time password");
+            // npmjs 官方 403：账号要求 2FA（可输入 OTP 发布），或需 bypass-2FA token。
+            let npmjs_2fa = is_npmjs
+                && (lower.contains("two-factor authentication")
+                    || lower.contains("bypass 2fa")
+                    || lower.contains("granular access token"));
+            let needs_otp = eotp || npmjs_2fa;
+            let (message, hint) = if npmjs_2fa {
+                (
+                    "发布被拒（403）：npmjs 要求两步验证（2FA）。\n\
+                     ① 若账号已启用 2FA：在手机验证器查看 6 位验证码并输入，即可发布（推荐，符合 npmjs 明年强制 2FA 的方向）\n\
+                     ② 若输入 OTP 后仍失败：说明当前 token 是 granular 类型，需在 npmjs 生成 Automation（bypass-2FA）token 并更新本账号\n\
+                     ③ 更新后在「上传登录」点「切换」生效"
+                        .to_string(),
+                    Some(PublishHint {
+                        text: "npmjs 2FA 与 Token 说明 ↗".to_string(),
+                        url: "https://docs.npmjs.com/about-two-factor-authentication"
+                            .to_string(),
+                    }),
+                )
+            } else if eotp {
+                (
+                    "发布需要一次性验证码（账号 2FA）：请在手机验证器查看 OTP 并重新发布。".to_string(),
+                    None,
+                )
+            } else {
+                (format!("发布失败:\n{}", out), None)
+            };
             results.push(PublishResult {
                 name: display,
                 version,
                 ok: false,
-                message: format!("发布失败:\n{}", out),
+                needs_otp,
+                message,
+                hint,
             });
         }
     }
@@ -1457,7 +1583,9 @@ fn list_accounts() -> AccountsFile {
 #[tauri::command]
 fn save_account(account: Account) -> Result<AccountsFile, String> {
     let mut file = read_accounts();
-    if let Some(existing) = file.accounts.iter_mut().find(|a| a.id == account.id) {
+    let id = account.id.clone();
+    let is_active = file.active.as_deref() == Some(id.as_str());
+    if let Some(existing) = file.accounts.iter_mut().find(|a| a.id == id) {
         // 作用域变更（全局<->项目、项目A->项目B）时，清理旧位置残留凭据
         if existing.project_dir != account.project_dir {
             let old = existing.clone();
@@ -1466,6 +1594,17 @@ fn save_account(account: Account) -> Result<AccountsFile, String> {
         *existing = account;
     } else {
         file.accounts.push(account);
+    }
+    // 编辑的是当前激活账号时，同步重写 .npmrc 凭据，
+    // 否则保存了新 token 但 .npmrc 仍是旧 token，发布会继续用旧凭据失败。
+    if is_active {
+        let acc = file
+            .accounts
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+            .ok_or("账号不存在")?;
+        write_npmrc_credential(&acc)?;
     }
     write_accounts(&file)?;
     Ok(file)
@@ -2042,6 +2181,38 @@ fn apply_project(path: String) -> Result<String, String> {
     }
 
     Ok(msgs.join("\n"))
+}
+
+/// 项目内允许编辑的配置文件白名单。
+const PROJECT_CONFIG_FILES: [&str; 3] = [".nvmrc", ".npmrc", "package.json"];
+
+fn project_config_file_path(project: &str, name: &str) -> Result<PathBuf, String> {
+    let p = Path::new(project);
+    if !p.is_dir() {
+        return Err("路径不是有效目录".to_string());
+    }
+    if !PROJECT_CONFIG_FILES.contains(&name) {
+        return Err(format!("不允许编辑该文件: {}", name));
+    }
+    Ok(p.join(name))
+}
+
+/// 读取项目配置文件内容（仅限白名单文件）。
+#[tauri::command]
+fn read_project_file(path: String, name: String) -> Result<String, String> {
+    let f = project_config_file_path(&path, &name)?;
+    if !f.exists() {
+        return Err(format!("文件不存在: {}", name));
+    }
+    std::fs::read_to_string(&f).map_err(|e| format!("读取失败: {}", e))
+}
+
+/// 写回项目配置文件内容（仅限白名单文件）。
+#[tauri::command]
+fn write_project_file(path: String, name: String, content: String) -> Result<String, String> {
+    let f = project_config_file_path(&path, &name)?;
+    std::fs::write(&f, &content).map_err(|e| format!("写入失败: {}", e))?;
+    Ok(content)
 }
 
 // ---------------------------------------------------------------------------
@@ -2960,6 +3131,35 @@ pub mod api {
     }
 }
 
+/// 列出各模块的配置文件/目录（Node / Python / Git / 工具自身），供前端「打开配置目录」使用。
+#[tauri::command]
+fn list_config_dirs() -> Vec<serde_json::Value> {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut add = |name: &str, path: String| {
+        let exists = std::path::Path::new(&path).exists();
+        items.push(serde_json::json!({ "name": name, "path": path, "exists": exists }));
+    };
+
+    // Node.js
+    add("npm 全局配置 (.npmrc)", format!("{}\\.npmrc", home));
+    add("npm 全局目录 (prefix)", format!("{}\\npm", appdata));
+    add("Node 版本安装目录", node_install_root());
+    add("nvm 安装目录", format!("{}\\nvm", appdata));
+    // Python
+    add("pip 配置 (pip.ini)", format!("{}\\pip\\pip.ini", appdata));
+    add("Python 版本安装目录", python_install_root());
+    // Git
+    add("SSH 密钥目录 (.ssh)", format!("{}\\.ssh", home));
+    add("Git 全局配置 (.gitconfig)", format!("{}\\.gitconfig", home));
+    // 工具自身
+    add("DevEnvManager 配置目录", format!("{}\\DevEnvManager", appdata));
+
+    items
+}
+
 // ---------------------------------------------------------------------------
 // 应用入口
 // ---------------------------------------------------------------------------
@@ -3000,6 +3200,8 @@ pub fn run() {
             install_pkg_manager,
             inspect_project,
             apply_project,
+            read_project_file,
+            write_project_file,
             detect_python,
             read_pip_index,
             set_pip_index,
@@ -3032,7 +3234,8 @@ pub fn run() {
             git_cmds::git_ssh_dir,
             git_cmds::git_open_in_manager,
             git_cmds::git_open_url,
-            git_cmds::git_check_env
+            git_cmds::git_check_env,
+            list_config_dirs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

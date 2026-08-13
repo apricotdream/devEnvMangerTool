@@ -4,6 +4,25 @@
 
 基于 **Rust + Tauri 2** 构建，前端使用原生 HTML/CSS/JS（无构建工具依赖）。
 
+> **当前版本：v0.2.0-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
+
+## 快速开始（免 Rust 环境）
+
+到 [Gitee Releases](https://gitee.com/apricotdream/devEnvMangerTool/releases) 下载最新版：
+
+| 文件 | 用途 |
+|---|---|
+| `DevEnvManager_0.2.0-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
+| `devenv-cli-0.2.0-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
+
+使用过程中，**无需安装 Rust / Node / Python**——工具会自行检测、下载并管理它们。仅 Git 模块需要本机有 Git + OpenSSH（缺失时应用内会引导安装）。
+
+### 系统要求
+
+- **Windows 10 / 11**（当前优先支持）
+- **WebView2 运行时**：Win11 自带；Win10 若缺失，安装器会自动引导安装
+- 首次运行若出现 SmartScreen「未知发布者」提示：点击「更多信息」→「仍要运行」即可（暂无代码签名证书）
+
 ## 功能
 
 ### Node.js
@@ -68,13 +87,17 @@ devenv git sync <repo>              # 同步仓库
 - **前端**：原生 HTML/CSS/JS（无 React/Vite，无构建工具）
 - **主题**：紫色深色（默认）/ 明亮，可切换并持久化
 
-## 环境要求
+## 源码构建（开发者）
+
+> 普通用户无需本节，直接使用上方「快速开始」的预编译安装包即可。
+
+### 环境要求
 
 - **Windows 10/11**（当前优先支持；Git 模块的 core 为跨平台设计）
-- Rust 工具链（MSVC）+ 已安装（可用 `setup-toolchain.cmd` 一键安装）
+- Rust 工具链（MSVC）（可用 `setup-toolchain.cmd` 一键安装，约 5~7GB / 20~40 分钟）
 - Git + OpenSSH（Git 模块使用，缺失时应用内提示安装引导）
 
-## 构建与运行
+### 构建与运行
 
 ```bash
 # 开发运行（自动编译并启动）
@@ -90,11 +113,23 @@ cargo tauri build       # 打包安装包（需 tauri-cli）
 
 > 首次编译需下载依赖，耗时较长。`start.cmd` 会自动检查工具链、增量编译并启动。
 
+### 打包发布（发版）
+
+发版构建在本地执行：先安装 `tauri-cli`，再运行根目录的 `build-release.cmd`，产物输出到 `dist/`（NSIS 安装包 + `devenv` CLI 便携 zip + SHA256SUMS.txt），最后上传到 Gitee Releases 并打 tag。
+
+```bash
+cargo install tauri-cli --locked
+# 或：npm install -g @tauri-apps/cli
+build-release.cmd
+```
+
+> `build-release.cmd` 为本地发版脚本，不入库（已在 .gitignore）。
+
 ## 项目结构
 
 ```
 ├── src/                  # 前端（HTML/CSS/JS）
-│   ├── index.html        # 主页面（Node 7 Tab + Git 4 Tab + Python 5 Tab）
+│   ├── index.html        # 主页面（Node 6 Tab + Git 4 Tab + Python 5 Tab）
 │   ├── styles.css        # 样式（双主题 CSS 变量）
 │   ├── main.js           # 前端逻辑
 │   └── backend.js        # Tauri invoke 桥接层

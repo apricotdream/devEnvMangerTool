@@ -378,6 +378,22 @@
       return null;
     },
 
+    async listConfigDirs() {
+      if (IS_TAURI) return _invoke("list_config_dirs");
+      await _delay(150);
+      return [
+        { name: "npm 全局配置 (.npmrc)", path: "C:\\Users\\dev\\.npmrc", exists: true },
+        { name: "npm 全局目录 (prefix)", path: "C:\\Users\\dev\\AppData\\Roaming\\npm", exists: true },
+        { name: "Node 版本安装目录", path: "C:\\Users\\dev\\AppData\\Local\\Programs\\nodejs", exists: true },
+        { name: "nvm 安装目录", path: "C:\\Users\\dev\\AppData\\Roaming\\nvm", exists: false },
+        { name: "pip 配置 (pip.ini)", path: "C:\\Users\\dev\\AppData\\Roaming\\pip\\pip.ini", exists: true },
+        { name: "Python 版本安装目录", path: "C:\\Users\\dev\\AppData\\Local\\Programs\\python", exists: true },
+        { name: "SSH 密钥目录 (.ssh)", path: "C:\\Users\\dev\\.ssh", exists: true },
+        { name: "Git 全局配置 (.gitconfig)", path: "C:\\Users\\dev\\.gitconfig", exists: true },
+        { name: "DevEnvManager 配置目录", path: "C:\\Users\\dev\\AppData\\Roaming\\DevEnvManager", exists: true },
+      ];
+    },
+
     /* ---------------- 包管理器 ---------------- */
 
     async listPkgManagers() {
@@ -430,6 +446,20 @@
       if (IS_TAURI) return _invoke("apply_project", { path });
       await _delay(500);
       return "已应用项目配置（模拟）";
+    },
+
+    async readProjectFile(path, name) {
+      if (IS_TAURI) return _invoke("read_project_file", { path, name });
+      await _delay(120);
+      if (name === "package.json") return '{ "name": "demo", "packageManager": "pnpm@9.15.0" }';
+      if (name === ".npmrc") return "registry=https://registry.npmmirror.com\n";
+      return "v22.20.0\n";
+    },
+
+    async writeProjectFile(path, name, content) {
+      if (IS_TAURI) return _invoke("write_project_file", { path, name, content });
+      await _delay(150);
+      return content;
     },
 
     /* ---------------- Python ---------------- */
