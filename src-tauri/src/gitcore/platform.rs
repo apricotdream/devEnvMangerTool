@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::gitcore::error::Error;
 
@@ -315,7 +314,7 @@ pub fn open_url(url: &str) -> Result<(), Error> {
 }
 
 fn spawn_explorer(args: &str) -> Result<(), Error> {
-    let mut child = Command::new("explorer.exe")
+    let mut child = crate::new_cmd("explorer.exe")
         .arg(args)
         .spawn()
         .map_err(|e| Error::Io {
@@ -328,7 +327,7 @@ fn spawn_explorer(args: &str) -> Result<(), Error> {
 }
 
 fn spawn_command(program: &str, args: &[&str]) -> Result<(), Error> {
-    Command::new(program)
+    crate::new_cmd(program)
         .args(args)
         .spawn()
         .map_err(|e| Error::Io {

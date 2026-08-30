@@ -133,8 +133,21 @@ pub struct NvmInfo {
 // 工具函数
 // ---------------------------------------------------------------------------
 
+/// 构造子进程命令。Windows 上统一加 `CREATE_NO_WINDOW`，
+/// 否则 node / npm.cmd / curl / powershell 等控制台子进程会弹出黑窗并闪烁。
+pub(crate) fn new_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program).args(args).output().ok()?;
+    let out = new_cmd(program).args(args).output().ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -150,7 +163,7 @@ fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
 
 /// 同时返回 stdout 与 stderr（探测需要区分「请求结果」与「证书/连接错误」）。
 fn run_cmd_both(program: &str, args: &[&str]) -> (String, String) {
-    match Command::new(program).args(args).output() {
+    match new_cmd(program).args(args).output() {
         Ok(out) => (
             String::from_utf8_lossy(&out.stdout).trim().to_string(),
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
@@ -922,7 +935,7 @@ fn set_user_path_entries(entries: &[String]) -> Result<(), String> {
     }
     let escaped = joined.replace('\'', "''");
     let ps = format!("[Environment]::SetEnvironmentVariable('Path', '{}', 'User')", escaped);
-    let out = Command::new("powershell")
+    let out = new_cmd("powershell")
         .args(["-NoProfile", "-Command", &ps])
         .output()
         .map_err(|e| e.to_string())?;
@@ -942,7 +955,7 @@ fn update_user_path_for_node(target: &str) -> Result<(), String> {
          [Environment]::SetEnvironmentVariable('Path', $new, 'User')",
         target
     );
-    let out = Command::new("powershell")
+    let out = new_cmd("powershell")
         .args(["-NoProfile", "-Command", &ps])
         .output()
         .map_err(|e| e.to_string())?;
@@ -1013,7 +1026,12 @@ fn detect_node() -> NodeEnvInfo {
 #[tauri::command]
 fn read_registry() -> Result<Option<String>, String> {
     let path = user_npmrc_path();
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    // 文件不存在 = 未配置 registry，语义上是 Ok(None)，不是错误。
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
     for line in content.lines() {
         let t = line.trim();
         if let Some(v) = t.strip_prefix("registry=") {
@@ -1055,7 +1073,7 @@ fn fix_path(dir: String) -> Result<PathResult, String> {
          if(-not ($p -split ';' -contains $d)){{ [Environment]::SetEnvironmentVariable('Path', $p.TrimEnd(';')+';'+$d,'User') }}",
         dir
     );
-    let out = Command::new("powershell")
+    let out = new_cmd("powershell")
         .args(["-NoProfile", "-Command", &ps])
         .output()
         .map_err(|e| e.to_string())?;
@@ -1328,7 +1346,7 @@ fn check_registry_package(registry: String, name: String) -> RegistryPackageChec
 /// 在指定目录跑 npm 命令（自动注入 NODE_EXTRA_CA_CERTS 以信任已锚定的自签证书）。
 fn run_npm_in(dir: &str, args: &[&str]) -> (i32, String) {
     let all_pem = format!("{}\\all.pem", certs_dir());
-    let mut cmd = Command::new("npm.cmd");
+    let mut cmd = new_cmd("npm.cmd");
     cmd.current_dir(dir).args(args);
     if Path::new(&all_pem).exists() {
         cmd.env("NODE_EXTRA_CA_CERTS", &all_pem);
@@ -1820,7 +1838,7 @@ $parts = $p -split ';' | Where-Object { $_ -and ($_ -notmatch 'nvm') }
         "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{}' -Wait",
         temp_ps1.to_string_lossy()
     );
-    let out = Command::new("powershell")
+    let out = new_cmd("powershell")
         .args(["-NoProfile", "-Command", &ps_cmd])
         .output();
     let _ = std::fs::remove_file(&temp_ps1);
@@ -1996,7 +2014,7 @@ fn install_pkg_manager(name: String, version: Option<String>) -> Result<String, 
     }
 
     let target = format!("{}@{}", name, ver);
-    let out = Command::new("npm.cmd")
+    let out = new_cmd("npm.cmd")
         .args(["install", "-g", &target])
         .output()
         .map_err(|e| e.to_string())?;
@@ -2424,7 +2442,7 @@ pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<Str
         ver, ver
     );
     let zip_path = format!("{}\\python-{}-amd64.zip", parent, ver);
-    let dl_ok = Command::new("curl.exe")
+    let dl_ok = new_cmd("curl.exe")
         .args(["-f", "-L", "-s", "-o", &zip_path, &zip_url])
         .output()
         .map(|o| o.status.success())
@@ -2445,7 +2463,7 @@ pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<Str
     if let Some(tar_url) = find_python_build_standalone(&ver) {
         emit("downloading");
         let tar_path = format!("{}\\python-{}.tar.gz", parent, ver);
-        let dl_ok = Command::new("curl.exe")
+        let dl_ok = new_cmd("curl.exe")
             .args(["-f", "-L", "-s", "-o", &tar_path, &tar_url])
             .output()
             .map(|o| o.status.success())
@@ -2487,7 +2505,7 @@ fn update_user_path_for_python(target: &str) -> Result<(), String> {
          [Environment]::SetEnvironmentVariable('Path', $new, 'User')",
         target, target
     );
-    let out = Command::new("powershell")
+    let out = new_cmd("powershell")
         .args(["-NoProfile", "-Command", &ps])
         .output()
         .map_err(|e| e.to_string())?;
@@ -3041,7 +3059,7 @@ fn install_python_pkg_manager(name: String, version: Option<String>) -> Result<S
             } else {
                 format!("{}=={}", name, ver)
             };
-            let out = Command::new("python")
+            let out = new_cmd("python")
                 .args(["-m", "pip", "install", &target])
                 .output()
                 .map_err(|e| e.to_string())?;
