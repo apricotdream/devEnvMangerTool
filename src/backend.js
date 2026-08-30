@@ -17,7 +17,14 @@
 
   async function _invoke(cmd, args) {
     if (IS_TAURI) {
-      return window.__TAURI__.core.invoke(cmd, args);
+      try {
+        return await window.__TAURI__.core.invoke(cmd, args);
+      } catch (e) {
+        // Tauri 把后端 `Err(String)` 序列化为字符串 reject，没有 .message；
+        // 统一包成 Error，避免上层 `e.message` 一律得到 undefined。
+        if (e instanceof Error) throw e;
+        throw new Error(typeof e === "string" ? e : JSON.stringify(e));
+      }
     }
     throw new Error(`[模拟模式] 命令 ${cmd} 未接入 Tauri`);
   }

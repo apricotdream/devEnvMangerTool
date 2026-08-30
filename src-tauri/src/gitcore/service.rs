@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -891,7 +891,7 @@ impl Service {
         timeout: Option<Duration>,
     ) -> Result<CommandOutput, Error> {
         let program = self.resolve_command(&args[0])?;
-        let mut command = Command::new(&program);
+        let mut command = crate::new_cmd(&program);
         command.args(&args[1..]);
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
