@@ -4,7 +4,7 @@
 
 基于 **Rust + Tauri 2** 构建，前端使用原生 HTML/CSS/JS（无构建工具依赖）。
 
-> **当前版本：v0.2.0-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
+> **当前版本：v0.2.1-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
 
 ## 快速开始（免 Rust 环境）
 
@@ -12,8 +12,8 @@
 
 | 文件 | 用途 |
 |---|---|
-| `DevEnvManager_0.2.0-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
-| `devenv-cli-0.2.0-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
+| `DevEnvManager_0.2.1-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
+| `devenv-cli-0.2.1-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
 
 使用过程中，**无需安装 Rust / Node / Python**——工具会自行检测、下载并管理它们。仅 Git 模块需要本机有 Git + OpenSSH（缺失时应用内会引导安装）。
 
@@ -115,15 +115,18 @@ cargo tauri build       # 打包安装包（需 tauri-cli）
 
 ### 打包发布（发版）
 
-发版构建在本地执行：先安装 `tauri-cli`，再运行根目录的 `build-release.cmd`，产物输出到 `dist/`（NSIS 安装包 + `devenv` CLI 便携 zip + SHA256SUMS.txt），最后上传到 Gitee Releases 并打 tag。
+发版构建在本地执行：先安装 `tauri-cli`，设置 Gitee 访问令牌，再运行根目录的 `publish-release.cmd`。脚本会读取 `Cargo.toml` 版本号，自动完成冲突检查、release 构建、收集产物到 `dist/`（NSIS 安装包 + `devenv` CLI 便携 zip + SHA256SUMS.txt）、在 `origin/main` 上打 tag，并调用 Gitee API 创建预发布 release、上传全部附件。
 
 ```bash
 cargo install tauri-cli --locked
 # 或：npm install -g @tauri-apps/cli
-build-release.cmd
+
+# Windows cmd（token 需在同一窗口设置）：
+set GITEE_TOKEN=你的_gitee_private_token
+publish-release.cmd
 ```
 
-> `build-release.cmd` 为本地发版脚本，不入库（已在 .gitignore）。
+> 发版前需先把改动合并到 `main`（脚本基于 `origin/main` 打 tag）。版本号在 `src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 两处同步递增；tag 命名为 `v<版本号>`（如 `v0.2.1-beta`），已存在的 tag 会被脚本拒绝。
 
 ## 项目结构
 
@@ -140,6 +143,7 @@ build-release.cmd
 │   └── src/gitcore/      # Git core 逻辑（多平台）
 ├── start.cmd             # 一键启动脚本
 ├── setup-toolchain.cmd   # 工具链安装脚本（Rust + MSVC）
+├── publish-release.cmd   # 一键发版脚本（构建 + 打 tag + 建 Gitee release 传包）
 └── docs/screenshot.png   # 界面截图
 ```
 
