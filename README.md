@@ -4,7 +4,7 @@
 
 基于 **Rust + Tauri 2** 构建，前端使用原生 HTML/CSS/JS（无构建工具依赖）。
 
-> **当前版本：v0.2.1-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
+> **当前版本：v0.2.2-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
 
 ## 快速开始（免 Rust 环境）
 
@@ -12,8 +12,8 @@
 
 | 文件 | 用途 |
 |---|---|
-| `DevEnvManager_0.2.1-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
-| `devenv-cli-0.2.1-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
+| `DevEnvManager_0.2.2-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
+| `devenv-cli-0.2.2-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
 
 使用过程中，**无需安装 Rust / Node / Python**——工具会自行检测、下载并管理它们。仅 Git 模块需要本机有 Git + OpenSSH（缺失时应用内会引导安装）。
 
