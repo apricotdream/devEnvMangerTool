@@ -56,6 +56,8 @@
     // 账号 Tab
     btnAddAccount: $("#btnAddAccount"),
     accountList: $("#accountList"),
+    npmrcCredWrap: $("#npmrcCredWrap"),
+    npmrcCredList: $("#npmrcCredList"),
     // Git Tab
     gitEnvBanner: $("#gitEnvBanner"),
     gitOvAccounts: $("#gitOvAccounts"),
@@ -66,13 +68,6 @@
     btnGitRefresh: $("#btnGitRefresh"),
     btnGitAdd: $("#btnGitAdd"),
     gitAccountList: $("#gitAccountList"),
-    gitKeyAccount: $("#gitKeyAccount"),
-    gitKeyInfo: $("#gitKeyInfo"),
-    gitPubKey: $("#gitPubKey"),
-    gitCloneHint: $("#gitCloneHint"),
-    btnGitCopyPubKey: $("#btnGitCopyPubKey"),
-    btnGitKeyUrl: $("#btnGitKeyUrl"),
-    btnGitGenKey: $("#btnGitGenKey"),
     btnGitSwitchGlobal: $("#btnGitSwitchGlobal"),
     btnGitSwitchLocal: $("#btnGitSwitchLocal"),
     btnGitSyncRepo: $("#btnGitSyncRepo"),
@@ -177,6 +172,39 @@
         btn.textContent = btn.dataset.origText;
         delete btn.dataset.origText;
       }
+    }
+  }
+
+  /* 全屏遮罩：执行异步任务期间展示加载遮罩（可自定义文案），结束/异常均关闭。 */
+  function _fslShow(text) {
+    const mask = els.fullscreenLoading;
+    const label = mask?.querySelector(".fsl-text");
+    let origText;
+    if (mask) {
+      if (label && text) { origText = label.textContent; label.textContent = text; }
+      mask.classList.remove("hidden");
+    }
+    return { mask, label, origText };
+  }
+
+  function _fslHide(handle) {
+    handle.mask?.classList.add("hidden");
+    if (handle.label && handle.origText) handle.label.textContent = handle.origText;
+  }
+
+  // minMs：遮罩最短显示时长，避免空目录迁移/秒回的操作只闪一帧导致“看不到加载”
+  async function withFullscreenLoading(text, task, minMs = 450) {
+    const handle = _fslShow(text);
+    const start = Date.now();
+    try {
+      return await task();
+    } finally {
+      const elapsed = Date.now() - start;
+      const remain = Math.max(0, minMs - elapsed);
+      if (remain > 0) {
+        await new Promise((r) => setTimeout(r, remain));
+      }
+      _fslHide(handle);
     }
   }
 
@@ -665,6 +693,8 @@
         },
       });
       log("info", `Node ${v} 安装完成: ${res.dir}`);
+      // 安装后后端已自动写入 PATH，主动重新检测刷新首页状态
+      runDetect(false);
     } catch (err) {
       log("err", `安装失败: ${err}`);
     } finally {
@@ -693,9 +723,11 @@
     const ok = await showModal("确认卸载", `将删除 Node ${v}\n\n此操作不可恢复。`, "删除");
     if (!ok) return;
     try {
-      const dir = await window.Backend.uninstallVersion(v);
+      await withFullscreenLoading(`卸载 Node ${v} 中…`, async () => {
+        await window.Backend.uninstallVersion(v);
+        await loadVersions();
+      });
       log("info", `已卸载 ${v}`);
-      loadVersions();
     } catch (err) {
       log("err", `卸载失败: ${err}`);
     }
@@ -743,6 +775,66 @@
       renderAccounts(file);
     } catch (e) {
       log("err", `加载账号失败: ${e.message}`);
+    }
+    scanNpmrcCreds();
+  }
+
+  // 扫描全局 ~/.npmrc 中未纳入管理的外部账号凭据，并展示连通性（后台静默，无遮罩）。
+  async function scanNpmrcCreds() {
+    try {
+      const creds = await window.Backend.scanNpmrcCredentials();
+      const wrap = els.npmrcCredWrap;
+      const list = els.npmrcCredList;
+      if (!wrap || !list) return;
+      list.innerHTML = "";
+      if (!creds || !creds.length) {
+        wrap.classList.add("hidden");
+        return;
+      }
+      wrap.classList.remove("hidden");
+      creds.forEach((c) => {
+        const dot = c.reachable ? "ok" : "err";
+        const status = c.reachable
+          ? `✓ 连通${c.username ? " · " + escapeHtml(c.username) : ""}`
+          : "✗ 连接/认证失败";
+        const div = document.createElement("div");
+        div.className = "account-item npmrc-cred";
+        div.innerHTML =
+          `<div class="acc-avatar">~</div>` +
+          `<div class="acc-info">` +
+          `<div class="acc-name">${escapeHtml(c.registry)} <span class="acc-scope">${c.authType === "token" ? "Token" : "用户名密码"}</span></div>` +
+          `<div class="acc-registry"><span class="state-dot ${dot}"></span> ${status}</div>` +
+          `<div class="acc-scope">来自全局 ~/.npmrc（未纳入本工具管理）</div>` +
+          `</div>` +
+          `<div class="acc-actions">` +
+          `<button class="btn btn-mini btn-ghost" data-act="import" data-registry="${escapeHtml(c.registry)}">纳入管理</button>` +
+          `</div>`;
+        list.appendChild(div);
+      });
+    } catch (e) {
+      log("err", `扫描 ~/.npmrc 失败: ${e.message || e}`);
+    }
+  }
+
+  // 把 ~/.npmrc 外部凭据登记为本工具可管理账号
+  async function importNpmrcCred(registry) {
+    const ok = await showModal(
+      "纳入管理",
+      `将把该账号登记到本工具进行管理：\n\n${registry}\n\n凭据仍保留在 ~/.npmrc，登记后可在发布源中选择、测试与编辑。`,
+      "纳入管理",
+    );
+    if (!ok) return;
+    try {
+      const res = await withFullscreenLoading("正在纳入管理…", async () =>
+        window.Backend.importNpmrcCredential(registry),
+      );
+      els.accountsData = res;
+      renderAccounts(res);
+      scanNpmrcCreds();
+      populatePubAccounts();
+      log("info", `已纳入管理: ${registry}`);
+    } catch (err) {
+      log("err", `纳入管理失败: ${err.message || err}`);
     }
   }
 
@@ -862,15 +954,18 @@
       fields: [
         { key: "name", label: "账号名称", type: "text", required: true, placeholder: "如: 公司 Nexus" },
         {
-          key: "registry", label: "Registry 地址", type: "text", required: true,
-          placeholder: "https://192.168.3.8:8980/repository/npm-group/",
+          key: "registry", label: "Registry 地址", type: "text",
+          // 留空 = 公网 npmjs 官方源；私服才需填写
+          placeholder: "留空 = 公网 https://registry.npmjs.org；私服填 http(s)://...",
           pattern: /^https?:\/\/.+/, patternMsg: "需以 http(s):// 开头",
         },
         {
           key: "npmjsNote", type: "note",
           html: (v) => {
             const reg = String(v.registry || "").toLowerCase().replace(/\/+$/, "");
-            const isNpmjs = reg === "https://registry.npmjs.org"
+            // 留空即默认公网 npmjs
+            const isNpmjs = reg === ""
+              || reg === "https://registry.npmjs.org"
               || reg === "http://registry.npmjs.org"
               || reg.includes("//registry.npmjs.org");
             if (!isNpmjs) return "";
@@ -907,7 +1002,8 @@
       ],
       initial: {
         name: acc?.name || "",
-        registry: acc?.registry || "",
+        // 新增账号默认指向公网 npmjs；编辑时沿用原值
+        registry: acc?.registry || "https://registry.npmjs.org",
         authType: acc?.authType || "token",
         token: acc?.token || "",
         username: acc?.username || "",
@@ -922,7 +1018,8 @@
         const account = {
           id: acc?.id || "acc_" + Date.now(),
           name: values.name.trim(),
-          registry: values.registry.trim(),
+          // registry 留空默认指向公网 npmjs
+          registry: values.registry.trim() || "https://registry.npmjs.org",
           authType,
           token: authType === "token" ? values.token.trim() : null,
           username: authType === "basic" ? values.username.trim() : null,
@@ -1021,8 +1118,7 @@
     if (act === "switch") gitSwitchIdentity(alias);
     else if (act === "test") gitTest(alias);
     else if (act === "key") {
-      activateGitTab(2); // 自动跳到 SSH 密钥子 Tab
-      gitShowPubKey(alias);
+      gitOpenKeyModal(alias);
     }
     else if (act === "edit") openGitAccountModal(alias);
     else if (act === "delete") gitDelete(alias);
@@ -1041,99 +1137,146 @@
   }
 
   async function gitTest(alias) {
+    let res;
     try {
-      const res = await window.Backend.gitTestConnection(alias);
-      log("info", `账号「${alias}」连接测试: ${res.success ? "成功" : "失败"} · ${res.output}`);
+      res = await withFullscreenLoading(`正在测试「${alias}」连接…`, () =>
+        window.Backend.gitTestConnection(alias));
     } catch (err) {
       log("err", `连接测试失败: ${err}`);
+      showGitTestResult(alias, { success: false, output: String(err && err.message ? err.message : err) });
+      return;
     }
+    log(res.success ? "info" : "warn", `账号「${alias}」连接测试: ${res.success ? "成功" : "失败"} · ${res.output}`);
+    showGitTestResult(alias, res);
   }
 
-  async function gitShowPubKey(alias) {
+  // 连接测试结果弹窗
+  function showGitTestResult(alias, res) {
+    modalState = { kind: "confirm", resolve: () => {} };
+    openModal({ title: `连接测试 · ${alias}`, width: "confirm" });
+    els.modalBody.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "modal-body--confirm";
+    const status = document.createElement("div");
+    status.style.color = res.success ? "var(--ok)" : "var(--err)";
+    status.style.fontWeight = "700";
+    status.style.marginBottom = "8px";
+    status.textContent = res.success ? "✓ 连接成功" : "✗ 连接失败";
+    wrap.appendChild(status);
+    const out = document.createElement("div");
+    out.style.whiteSpace = "pre-wrap";
+    out.style.wordBreak = "break-all";
+    out.textContent = res.output || "（无输出）";
+    wrap.appendChild(out);
+    els.modalBody.appendChild(wrap);
+    renderActions([
+      { text: "关闭", cls: "btn-ghost", onClick: closeModal },
+    ]);
+  }
+
+  // SSH 密钥悬浮框：在「账号管理」点账号的「SSH密钥」时弹出，展示原 SSH 密钥标签页信息
+  async function gitOpenKeyModal(alias) {
+    els._gitSelectedAlias = alias;
+    let acc;
     try {
       const accounts = await window.Backend.gitListAccounts();
-      const acc = accounts.find((a) => a.alias === alias);
-      const keyPath = acc?.keyPath || null;
-      const pub = await window.Backend.gitReadPublicKey(keyPath);
-      els.gitKeyAccount.textContent = `「${alias}」`;
-      els.gitKeyInfo.textContent = keyPath ? `私钥: ${keyPath}` : "（未配置私钥路径）";
-      els.gitPubKey.value = pub || "（无公钥，请先生成密钥）";
-      // clone 指引
-      const host = acc?.hostName || alias;
-      const user = acc?.sshUser || "git";
-      els.gitCloneHint.textContent = `公钥添加后 SSH clone: git clone git@${host}:owner/repo（或 git@${alias}:owner/repo）`;
-      log("info", `已加载「${alias}」公钥`);
+      acc = accounts.find((a) => a.alias === alias);
+    } catch (err) {
+      log("err", `读取账号失败: ${err}`);
+      return;
+    }
+    const keyPath = acc?.keyPath || null;
+    let pub = "";
+    try {
+      pub = await window.Backend.gitReadPublicKey(keyPath);
     } catch (err) {
       log("err", `读取公钥失败: ${err}`);
     }
-  }
 
-  async function gitCopyPubKey() {
-    const pub = els.gitPubKey.value;
-    if (!pub || pub.startsWith("（")) {
-      log("warn", "当前没有可复制的公钥，请先加载账号的 SSH 密钥");
-      return;
-    }
-    // 首选现代 clipboard API
-    try {
-      await navigator.clipboard.writeText(pub);
-      log("info", "公钥已复制，可粘贴到平台的 SSH 密钥设置页");
-      return;
-    } catch (_e1) { /* 继续走回退 */ }
-    // 回退：聚焦选中 + execCommand（兼容未聚焦窗口/旧环境）
-    try {
-      const ta = els.gitPubKey;
-      ta.focus();
-      ta.select();
-      document.execCommand("copy");
-      log("info", "公钥已复制（回退方式）");
-    } catch (e2) {
-      log("err", `复制失败: ${e2.message}`);
-    }
-  }
+    modalState = { kind: "confirm", resolve: () => {} };
+    openModal({ title: `SSH 密钥 · ${alias}`, width: "form" }); // 公钥较长，用更宽的弹窗
+    els.modalBody.innerHTML = "";
 
-  async function gitOpenKeyUrl() {
-    const alias = els._gitSelectedAlias;
-    if (!alias) {
-      log("warn", "请先选中一个账号（点「SSH密钥」）");
-      return;
-    }
-    try {
-      const url = await window.Backend.gitGetKeyUrl(alias);
-      if (url) {
-        log("info", `打开平台密钥页: ${url}`);
-        window.Backend.gitOpenUrl(url);
-      } else {
-        log("warn", "该账号没有对应的平台密钥管理页");
-      }
-    } catch (err) {
-      log("err", `获取密钥页失败: ${err}`);
-    }
-  }
+    const wrap = document.createElement("div");
+    wrap.style.margin = "14px 20px 0";
 
-  async function gitGenKey() {
-    let alias = els._gitSelectedAlias;
-    if (!alias) {
-      const accounts = await window.Backend.gitListAccounts();
-      if (accounts.length) {
-        alias = accounts[0].alias;
-        els._gitSelectedAlias = alias;
-        log("info", `未选中账号，自动使用第一个「${alias}」`);
-      } else {
-        log("warn", "没有可用的 Git 账号，请先新增账号");
+    const info = document.createElement("div");
+    info.className = "fix-status";
+    info.style.marginBottom = "8px";
+    info.textContent = keyPath ? `私钥: ${keyPath}` : "（未配置私钥路径）";
+    wrap.appendChild(info);
+
+    const ta = document.createElement("textarea");
+    ta.className = "pubkey-box mono";
+    ta.readOnly = true;
+    ta.value = pub || "（无公钥，请先生成密钥）";
+    wrap.appendChild(ta);
+
+    const hint = document.createElement("div");
+    hint.className = "install-path mono";
+    hint.style.marginTop = "8px";
+    const host = acc?.hostName || alias;
+    hint.textContent = `公钥添加后 SSH clone: git clone git@${host}:owner/repo（或 git@${alias}:owner/repo）`;
+    wrap.appendChild(hint);
+
+    els.modalBody.appendChild(wrap);
+
+    const copyPub = async () => {
+      const text = ta.value;
+      if (!text || text.startsWith("（")) {
+        log("warn", "当前没有可复制的公钥，请先生成密钥");
         return;
       }
-    }
-    const ok = await showModal("生成 SSH 密钥", `将为账号「${alias}」生成 RSA 密钥对`, "生成");
-    if (!ok) return;
-    try {
-      const path = await window.Backend.gitGenerateKey(alias, "", null);
-      log("info", `已生成密钥: ${path}`);
-      await gitShowPubKey(alias);
-      loadGitAccounts();
-    } catch (err) {
-      log("err", `生成密钥失败: ${err}`);
-    }
+      try {
+        await navigator.clipboard.writeText(text);
+        log("info", "公钥已复制，可粘贴到平台的 SSH 密钥设置页");
+        return;
+      } catch (_e1) { /* 继续走回退 */ }
+      try {
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        log("info", "公钥已复制（回退方式）");
+      } catch (e2) {
+        log("err", `复制失败: ${e2.message}`);
+      }
+    };
+
+    const openUrl = async () => {
+      try {
+        const url = await window.Backend.gitGetKeyUrl(alias);
+        if (url) {
+          log("info", `打开平台密钥页: ${url}`);
+          window.Backend.gitOpenUrl(url);
+        } else {
+          log("warn", "该账号没有对应的平台密钥管理页");
+        }
+      } catch (err) {
+        log("err", `获取密钥页失败: ${err}`);
+      }
+    };
+
+    const genKey = async () => {
+      const ok = await showModal("生成 SSH 密钥", `将为账号「${alias}」生成 RSA 密钥对`, "生成");
+      if (!ok) { gitOpenKeyModal(alias); return; } // 取消后回到密钥悬浮框
+      try {
+        const path = await window.Backend.gitGenerateKey(alias, "", null);
+        log("info", `已生成密钥: ${path}`);
+        loadGitAccounts();
+        gitOpenKeyModal(alias); // 重新打开悬浮框以刷新公钥
+      } catch (err) {
+        log("err", `生成密钥失败: ${err}`);
+        gitOpenKeyModal(alias);
+      }
+    };
+
+    renderActions([
+      { text: "复制公钥", cls: "btn-ghost", onClick: copyPub },
+      { text: "打开平台密钥页", cls: "btn-ghost", onClick: openUrl },
+      { text: "生成 SSH 密钥", cls: "btn-primary", onClick: genKey },
+      { text: "关闭", cls: "btn-ghost", onClick: closeModal },
+    ]);
+    log("info", `已加载「${alias}」公钥`);
   }
 
   async function gitSwitchGlobal() {
@@ -1190,22 +1333,23 @@
     openFormModal({
       title: sourceAlias ? "编辑 Git 账号" : "新增 Git 账号",
       fields: [
-        { key: "alias", label: "Host 别名", type: "text", required: true, placeholder: "github-work" },
-        { key: "hostName", label: "主机地址", type: "text", required: true, placeholder: "github.com" },
+        { key: "alias", label: "Host 别名", type: "text", required: true, placeholder: "本地标签，用于 git@别名:仓库，如 github.com / github-work" },
+        { key: "hostName", label: "主机地址", type: "text", required: true, placeholder: "SSH 实际连接的服务器域名/IP，如 github.com" },
         {
           key: "port", label: "SSH 端口", type: "number", defaultValue: "22", min: 1, max: 65535,
           required: true, validate: (v) => (Number(v) >= 1 && Number(v) <= 65535) ? null : "端口范围 1-65535",
         },
-        { key: "sshUser", label: "SSH 用户", type: "text", defaultValue: "git" },
-        { key: "gitName", label: "Git 用户名", type: "text", placeholder: "你的用户名" },
+        { key: "sshUser", label: "SSH 用户", type: "text", defaultValue: "git", placeholder: "SSH 登录用户，GitHub 固定填 git" },
+        { key: "gitName", label: "Git 用户名", type: "text", required: true, placeholder: "Git 提交署名，如 octocat" },
         {
-          key: "gitEmail", label: "Git 邮箱", type: "text", placeholder: "you@example.com",
+          key: "gitEmail", label: "Git 邮箱", type: "text", required: true, placeholder: "Git 提交邮箱，如 you@example.com",
           pattern: /^[^@\s]+@[^@\s]+\.[^@\s]+$/, patternMsg: "邮箱格式不正确",
         },
-        { key: "keyPath", label: "私钥路径（留空自动）", type: "text", placeholder: "C:\\Users\\you\\.ssh\\id_rsa_github" },
+        { key: "keyPath", label: "私钥路径（留空自动生成）", type: "text", placeholder: "留空自动生成，如 ~/.ssh/id_rsa_github" },
         { key: "generateKey", label: "同时生成 SSH 密钥", labelText: "同时生成 SSH 密钥", type: "checkbox", defaultValue: true },
       ],
       initial: {
+        // 新建留空，GitHub 示例以 placeholder 灰色提示；编辑时沿用原值
         alias: acc?.alias || "",
         hostName: acc?.hostName || "",
         port: acc?.port || "22",
@@ -1227,14 +1371,23 @@
           gitEmail: values.gitEmail.trim(),
         };
         const generateKey = values.generateKey;
-        if (sourceAlias) {
-          await window.Backend.gitUpdateAccount(sourceAlias, account, generateKey);
-          log("info", `账号「${account.alias}」已更新`);
-        } else {
-          await window.Backend.gitAddAccount(account, generateKey);
-          log("info", `账号「${account.alias}」已新增`);
+        // 先关表单弹窗，再用全屏遮罩跑保存（生成 SSH 密钥较慢）；错误走日志
+        closeModal();
+        const action = sourceAlias ? "更新" : "新增";
+        try {
+          await withFullscreenLoading(`${action}账号并生成密钥中…`, async () => {
+            if (sourceAlias) {
+              await window.Backend.gitUpdateAccount(sourceAlias, account, generateKey);
+            } else {
+              await window.Backend.gitAddAccount(account, generateKey);
+            }
+          });
+          log("info", `账号「${account.alias}」已${action}`);
+        } catch (err) {
+          log("err", `${action}账号失败: ${err.message || err}`);
+        } finally {
+          loadGitAccounts();
         }
-        loadGitAccounts();
       },
     });
   }
@@ -1276,6 +1429,9 @@
     }
   }
 
+  // 支持切换数据目录的包管理器（cnpm 的数据是 .cnpmrc 配置文件，不支持）
+  const PKG_DATA_DIR_SWITCHABLE = new Set(["pnpm", "yarn", "pm2", "bun"]);
+
   function renderPkgManagers(managers) {
     const list = els.pkgList;
     list.innerHTML = "";
@@ -1283,6 +1439,7 @@
       const div = document.createElement("div");
       div.className = "pkg-item" + (m.installed ? " installed" : "");
       const dot = m.installed ? "ok" : "err";
+      const canSwitch = m.installed && PKG_DATA_DIR_SWITCHABLE.has(m.name);
       div.innerHTML =
         `<span class="pkg-name">${escapeHtml(m.name)}</span>` +
         `<div class="pkg-body">` +
@@ -1292,6 +1449,8 @@
         `<div class="pkg-actions">` +
         `<button class="btn btn-mini btn-ghost" data-act="install" data-name="${m.name}">安装/切换</button>` +
         (m.installed && m.dataDir ? `<button class="btn btn-mini btn-ghost" data-act="opendir" data-dir="${m.dataDir}">数据目录</button>` : "") +
+        (canSwitch ? `<button class="btn btn-mini btn-ghost" data-act="datadir" data-name="${m.name}" data-dir="${m.dataDir || ""}">切换目录</button>` : "") +
+        (m.installed ? `<button class="btn btn-mini btn-ghost btn-danger" data-act="uninstall" data-name="${m.name}">卸载</button>` : "") +
         `</div>`;
       list.appendChild(div);
     });
@@ -1305,6 +1464,48 @@
     if (act === "install") installPkg(name);
     else if (act === "opendir") {
       window.Backend.gitOpenInManager(btn.dataset.dir, false).catch(() => {});
+    } else if (act === "uninstall") uninstallPkg(name);
+    else if (act === "datadir") switchPkgDataDir(name, btn.dataset.dir);
+  }
+
+  async function uninstallPkg(name) {
+    const ok = await showModal(
+      "确认卸载",
+      `将卸载 ${name} 并删除其数据/缓存目录。\n\n此操作不可恢复，确定继续？`,
+      "卸载",
+    );
+    if (!ok) return;
+    try {
+      const res = await withFullscreenLoading(`卸载 ${name} 中…`, async () =>
+        window.Backend.uninstallPkgManager(name),
+      );
+      log("info", res);
+    } catch (err) {
+      log("err", `卸载失败: ${err.message || err}`);
+    } finally {
+      loadPkgManagers();
+    }
+  }
+
+  async function switchPkgDataDir(name, currentDir) {
+    const target = await window.Backend.pickFolder(`选择 ${name} 的新数据目录`);
+    if (!target) return;
+    const ok = await showModal(
+      "切换数据目录",
+      `将把 ${name} 的数据目录迁移到：\n\n${target}\n\n` +
+        `会移动现有数据（${currentDir || "默认目录"}）到新位置，并更新配置。\n重开终端后生效。`,
+      "迁移并切换",
+    );
+    if (!ok) return;
+    try {
+      const res = await withFullscreenLoading(`迁移 ${name} 数据目录中…`, async () =>
+        window.Backend.switchPkgDataDir(name, target),
+      );
+      log("info", res);
+    } catch (err) {
+      log("err", `切换数据目录失败: ${err.message || err}`);
+    } finally {
+      loadPkgManagers();
     }
   }
 
@@ -1325,9 +1526,18 @@
       submitText: "继续",
       onSubmit: async (values) => {
         const version = values.version.trim() || null;
-        const res = await window.Backend.installPkgManager(name, version);
-        log("info", res);
-        loadPkgManagers();
+        // 先关表单弹窗，再用全屏遮罩跑安装（npm i -g / bun 脚本较慢）；错误走日志
+        closeModal();
+        try {
+          const res = await withFullscreenLoading(`安装 ${name} 中…`, async () =>
+            window.Backend.installPkgManager(name, version),
+          );
+          log("info", res);
+        } catch (err) {
+          log("err", `安装失败: ${err.message || err}`);
+        } finally {
+          loadPkgManagers();
+        }
       },
     });
   }
@@ -1498,7 +1708,13 @@
     try {
       const file = await window.Backend.listAccounts();
       const sel = els.pubAccountSel;
+      const NPMJS = "https://registry.npmjs.org";
       sel.innerHTML = '<option value="">-- 从上传登录账号选择 --</option>';
+      // 默认选项：公网 npmjs 官方源
+      const npmOpt = document.createElement("option");
+      npmOpt.value = NPMJS;
+      npmOpt.textContent = "公网 npmjs · registry.npmjs.org";
+      sel.appendChild(npmOpt);
       for (const acc of file.accounts || []) {
         const opt = document.createElement("option");
         opt.value = acc.registry || "";
@@ -1509,9 +1725,10 @@
       if (active?.registry) {
         sel.value = active.registry;
         els.pubRegistry.value = active.registry;
-      } else if (!els.pubRegistry.value) {
-        // 默认取全局下载源？发布源不同，保持空让用户填
-        els.pubRegistry.value = "";
+      } else {
+        // 无激活账号时默认选公网 npmjs
+        sel.value = NPMJS;
+        els.pubRegistry.value = NPMJS;
       }
     } catch (e) {
       log("warn", `加载账号用于发布源失败: ${e.message}`);
@@ -1598,6 +1815,8 @@
       log("warn", "请填写发布源 registry");
       return;
     }
+    // 发布前自动扫描 ~/.npmrc 外部账号，提示可用凭据（静默，不阻断发布）
+    scanNpmrcCreds();
     const selected = els._pubPackages.filter((p) => {
       const ckid = "pubck_" + p.dir.replace(/[^a-zA-Z0-9_]/g, "_");
       const cb = document.getElementById(ckid);
@@ -1991,9 +2210,11 @@
     const ok = await showModal("确认卸载", `将删除 Python ${v}\n\n此操作不可恢复。`, "删除");
     if (!ok) return;
     try {
-      const dir = await window.Backend.uninstallPythonVersion(v);
+      await withFullscreenLoading(`卸载 Python ${v} 中…`, async () => {
+        await window.Backend.uninstallPythonVersion(v);
+        await loadPythonVersions();
+      });
       log("info", `已卸载 ${v}`);
-      loadPythonVersions();
     } catch (err) {
       log("err", `卸载失败: ${err}`);
     }
@@ -2485,6 +2706,7 @@
         input.type = "password";
         input.dataset.key = f.key;
         input.placeholder = f.placeholder || "";
+        input.value = values[f.key] || "";
         const toggle = document.createElement("button");
         toggle.type = "button";
         toggle.className = "btn btn-mini btn-ghost";
@@ -2664,25 +2886,17 @@
     els.btnInstall.disabled = true;
     els.btnFixPath.disabled = true;
     log("cmd", "> 开始安装 Node");
+    let installed = false;
 
     try {
       const res = await window.Backend.installNode({
         onProgress: (pct, text) => setProgress(pct, text),
       });
       if (res.ok) {
+        installed = true;
         log("info", `Node ${res.version} 安装完成 -> ${res.dir}`);
         els.installPath.textContent = `已安装: ${res.dir}`;
-        // 安装后询问是否加入 PATH
-        const addPath = await showModal(
-          "加入 PATH",
-          `是否将以下目录追加到用户 PATH？\n\n${res.dir}\n\n修改后请重开终端生效。`,
-          "加入 PATH",
-        );
-        if (addPath) {
-          const p = await window.Backend.fixPath(res.dir);
-          log("info", `PATH 已更新: ${p.path}`);
-          els.fixStatus.textContent = "PATH 已更新，请重开终端生效";
-        }
+        els.fixStatus.textContent = "PATH 已更新，请重开终端生效";
       }
     } catch (e) {
       log("err", `安装失败: ${e.message}`);
@@ -2692,6 +2906,8 @@
       els.btnInstall.disabled = false;
       els.btnFixPath.disabled = false;
       setTimeout(() => els.progressArea.classList.add("hidden"), 2500);
+      // 安装成功后后端已自动写入 PATH，主动重新检测刷新首页状态
+      if (installed) runDetect(false);
     }
   }
 
@@ -2724,15 +2940,18 @@
 
     els.btnDetect.addEventListener("click", () => {
       const activeNav = document.querySelector(".nav-item.active")?.dataset.page;
+      // 仅手动点击时加全屏遮罩；安装/切换后自动触发的 runDetect 不走这里，不弹遮罩
       if (activeNav === "git") {
-        loadGitAccounts();
+        withFullscreenLoading("检测中…", () => loadGitAccounts()).catch(() => {});
       } else if (activeNav === "python") {
-        loadPythonDetect(false);
+        withFullscreenLoading("检测中…", () => loadPythonDetect(false)).catch(() => {});
       } else {
-        runDetect(false);
+        withFullscreenLoading("检测中…", () => runDetect(false)).catch(() => {});
       }
     });
-    els.btnReprobe.addEventListener("click", () => runDetect(true));
+    els.btnReprobe.addEventListener("click", () =>
+      withFullscreenLoading("网络测速中…", () => runDetect(true)).catch(() => {}),
+    );
     els.btnApplyMirror.addEventListener("click", applyMirror);
     els.btnTestRegistry.addEventListener("click", testConnection);
     els.btnInstall.addEventListener("click", handleInstall);
@@ -2749,6 +2968,10 @@
     // 账号 Tab
     els.accountList.addEventListener("click", onAccountAction);
     els.btnAddAccount.addEventListener("click", () => openAccountModal(null));
+    els.npmrcCredList.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-act='import']");
+      if (btn) importNpmrcCred(btn.dataset.registry);
+    });
 
     els.btnClearLog.addEventListener("click", () => {
       els.console.innerHTML = "";
@@ -2794,8 +3017,6 @@
           $$(".tab-panel").forEach((p) => p.classList.add("hidden"));
           setPageTopbar("python");
           activatePythonTab(1);
-        } else {
-          log("warn", `「${page}」将在后续里程碑支持`);
         }
       });
     });
@@ -2805,11 +3026,8 @@
     els.btnGitAdd.addEventListener("click", () => openGitAccountModal(null));
     els.gitAccountList.addEventListener("click", onGitAccountAction);
     els.btnGitSyncRepo.addEventListener("click", gitSyncRepo);
-    els.btnGitGenKey.addEventListener("click", gitGenKey);
     els.btnGitSwitchGlobal.addEventListener("click", gitSwitchGlobal);
     els.btnGitSwitchLocal.addEventListener("click", gitSwitchLocal);
-    els.btnGitCopyPubKey.addEventListener("click", gitCopyPubKey);
-    els.btnGitKeyUrl.addEventListener("click", gitOpenKeyUrl);
 
     // 包管理器
     els.btnPkgRefresh.addEventListener("click", loadPkgManagers);

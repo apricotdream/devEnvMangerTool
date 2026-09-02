@@ -274,6 +274,9 @@ struct CurlProbe {
 fn probe_curl(endpoint: &str, auth_args: &[&str]) -> CurlProbe {
     let mut args: Vec<String> = vec![
         "-sS".into(), // 静默进度，但保留错误输出到 stderr（证书/连接错误需靠它判定）
+        // schannel 默认做证书吊销检查（CRL/OCSP）；内网私有源吊销服务器不可达时
+        // 会报 CRYPT_E_NO_REVOCATION_CHECK 误判为不可达。跳过吊销检查（仍验证证书链）。
+        "--ssl-no-revoke".into(),
         "-o".into(),
         "NUL".into(),
         "-w".into(),
@@ -521,6 +524,9 @@ fn is_cert_error(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
     let binary_mirror = "https://registry.npmmirror.com/-/binary/node";
+    // 归一化：调用方可能传入带 v 前缀（版本列表）或裸版本号（latest_lts），
+    // 统一剥掉前缀，避免拼出 vvX.Y.Z 导致镜像 404。
+    let version = version.strip_prefix('v').unwrap_or(version);
     let local = std::env::var("LOCALAPPDATA").map_err(|_| "缺少 LOCALAPPDATA".to_string())?;
     let parent = format!("{}\\Programs\\nodejs", local);
     let target = format!("{}\\v{}", parent, version);
@@ -531,16 +537,40 @@ pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, St
         let zip_url = format!("{}/v{}/node-v{}-win-x64.zip", binary_mirror, version, version);
 
         emit("downloading");
+        let _ = std::fs::remove_file(&zip_path);
         run_cmd("curl.exe", &["-L", "-s", "-o", &zip_path, &zip_url]);
-        if !Path::new(&zip_path).exists() {
+        let zip = Path::new(&zip_path);
+        if !zip.exists() {
             return Err("下载 Node 失败（curl 未生成文件）".to_string());
+        }
+        // 镜像对错误 URL 会回 404 JSON/HTML 而非 zip，curl -s 仍会落盘。
+        // 校验 zip 魔数（PK\x03\x04），把「下载失败」与「解压失败」区分开。
+        use std::io::Read;
+        let mut header = [0u8; 4];
+        std::fs::File::open(zip)
+            .and_then(|mut f| f.read_exact(&mut header))
+            .map_err(|e| format!("读取下载文件失败：{}", e))?;
+        if header != [0x50, 0x4B, 0x03, 0x04] {
+            let _ = std::fs::remove_file(&zip_path);
+            return Err(format!(
+                "下载 Node 失败：服务器未返回有效 zip（版本 v{} 可能不存在，或镜像地址有误）",
+                version
+            ));
         }
 
         emit("extracting");
-        let _ = run_cmd("tar.exe", &["-xf", &zip_path, "-C", &parent]);
+        let out = new_cmd("tar.exe")
+            .args(["-xf", &zip_path, "-C", &parent])
+            .output()
+            .map_err(|e| format!("启动 tar 解压失败：{}", e))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let _ = std::fs::remove_file(&zip_path);
+            return Err(format!("解压 Node 失败：{}", stderr));
+        }
         let extracted = format!("{}\\node-v{}-win-x64", parent, version);
         if !Path::new(&extracted).exists() {
-            return Err("解压 Node 失败".to_string());
+            return Err("解压 Node 失败：解压后未找到目标目录".to_string());
         }
         let _ = std::fs::rename(&extracted, &target);
         let _ = std::fs::remove_file(&zip_path);
@@ -604,6 +634,8 @@ fn check_whoami(account: &Account) -> Option<String> {
 
     let mut auth_args: Vec<String> = vec![
         "-sS".to_string(),
+        // 内网私有源吊销服务器不可达时 schannel 报 CRYPT_E_NO_REVOCATION_CHECK，跳过吊销检查
+        "--ssl-no-revoke".to_string(),
         "-m".to_string(),
         "10".to_string(),
         "-w".to_string(),
@@ -653,6 +685,180 @@ fn check_whoami(account: &Account) -> Option<String> {
         .ok()
         .and_then(|v| v.get("username").and_then(|n| n.as_str()).map(|s| s.to_string()))
         .or_else(|| Some(body.to_string()))
+}
+
+/// 从全局 ~/.npmrc 扫描到的外部凭据（npm login / 其它工具写入，未纳入本工具管理）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NpmrcCredential {
+    pub registry: String,
+    pub auth_type: String, // "token" | "basic"
+    pub username: Option<String>, // whoami 连通成功时
+    pub reachable: bool,
+}
+
+/// 扫描全局 ~/.npmrc 中已存在的账号凭据，排除本工具已管理的账号，并检测连通性。
+#[tauri::command]
+fn scan_npmrc_credentials() -> Vec<NpmrcCredential> {
+    let content = match std::fs::read_to_string(user_npmrc_path()) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(), // 无 .npmrc
+    };
+    let managed = read_accounts();
+    let managed_keys: Vec<String> = managed
+        .accounts
+        .iter()
+        .map(|a| npmrc_key(&a.registry))
+        .collect();
+
+    let mut out: Vec<NpmrcCredential> = Vec::new();
+    for line in content.lines() {
+        let l = line.trim();
+        // 凭据行形如 //host[:port][/path]/:_authToken=xxx 或 :_auth=base64
+        let (key, auth_type) = if let Some((k, v)) = l.split_once(":_authToken=") {
+            if v.trim().is_empty() { continue; }
+            (k.trim(), "token")
+        } else if let Some((k, v)) = l.split_once(":_auth=") {
+            if v.trim().is_empty() { continue; }
+            (k.trim(), "basic")
+        } else {
+            continue;
+        };
+        // 仅处理 npmrc registry 键（以 // 开头），跳过 email= 等无关行
+        if !key.starts_with("//") {
+            continue;
+        }
+        // 本工具已管理的账号不重复展示
+        if managed_keys.iter().any(|m| m == key) {
+            continue;
+        }
+        // key: //host[:port][/path]/  ->  registry URL
+        let host_path = key.trim_start_matches('/').trim_end_matches('/');
+        let registry = format!("https://{}", host_path);
+
+        // 构造临时账号做 whoami 探测
+        let account = if auth_type == "basic" {
+            // _auth 是 base64(user:pass)，解码出用户名/密码用于重建 Authorization
+            let decoded = v_after(line, ":_auth=")
+                .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            let (username, password) = decoded
+                .and_then(|s| s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())))
+                .unzip();
+            Account {
+                id: String::new(),
+                name: String::new(),
+                registry: registry.clone(),
+                auth_type: "basic".to_string(),
+                token: None,
+                username,
+                password,
+                project_dir: None,
+            }
+        } else {
+            Account {
+                id: String::new(),
+                name: String::new(),
+                registry: registry.clone(),
+                auth_type: "token".to_string(),
+                token: v_after(line, ":_authToken=").map(|s| s.to_string()),
+                username: None,
+                password: None,
+                project_dir: None,
+            }
+        };
+        let username = check_whoami(&account);
+        out.push(NpmrcCredential {
+            registry,
+            auth_type: auth_type.to_string(),
+            reachable: username.is_some(),
+            username,
+        });
+    }
+    out
+}
+
+/// 取某标记之后的值（trim）。
+fn v_after<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    line.split_once(marker).map(|(_, v)| v.trim())
+}
+
+/// 把 ~/.npmrc 中指定 registry 的外部凭据纳入本工具管理（写入 accounts.json）。
+/// 凭据本身仍保留在 ~/.npmrc，这里只是登记，使其可在发布/账号列表中管理。
+#[tauri::command]
+fn import_npmrc_credential(registry: String) -> Result<AccountsFile, String> {
+    let reg = registry.trim().trim_end_matches('/').to_string();
+    let content = std::fs::read_to_string(user_npmrc_path()).map_err(|e| format!("读取 ~/.npmrc 失败：{}", e))?;
+    let want_key = npmrc_key(&reg);
+
+    // 在 npmrc 中找到该 registry 的凭据行
+    let mut found: Option<Account> = None;
+    for line in content.lines() {
+        let l = line.trim();
+        let (key, auth_type, secret) = if let Some((k, v)) = l.split_once(":_authToken=") {
+            if v.trim().is_empty() { continue; }
+            (k.trim(), "token", v.trim().to_string())
+        } else if let Some((k, v)) = l.split_once(":_auth=") {
+            if v.trim().is_empty() { continue; }
+            (k.trim(), "basic", v.trim().to_string())
+        } else {
+            continue;
+        };
+        if key != want_key {
+            continue;
+        }
+        let safe_id: String = want_key
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let mut acc = Account {
+            id: format!("acc_{}", safe_id),
+            name: String::new(),
+            registry: reg.clone(),
+            auth_type: auth_type.to_string(),
+            token: None,
+            username: None,
+            password: None,
+            project_dir: None,
+        };
+        if auth_type == "token" {
+            acc.token = Some(secret);
+        } else {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&secret)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok());
+            if let Some((u, p)) = decoded.and_then(|s| s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))) {
+                acc.username = Some(u.clone());
+                acc.password = Some(p);
+                acc.name = u;
+            }
+        }
+        found = Some(acc);
+        break;
+    }
+    let mut account = found.ok_or_else(|| format!("~/.npmrc 中未找到 {} 的凭据", reg))?;
+
+    let mut file = read_accounts();
+    // 已登记则更新，否则新增
+    if let Some(existing) = file.accounts.iter_mut().find(|a| npmrc_key(&a.registry) == want_key) {
+        existing.auth_type = account.auth_type.clone();
+        existing.token = account.token.clone();
+        existing.username = account.username.clone();
+        existing.password = account.password.clone();
+    } else {
+        // 名称：whoami 用户名优先，否则用 host
+        if account.name.is_empty() {
+            account.name = check_whoami(&account)
+                .or_else(|| {
+                    url_host_port(&reg).map(|(h, _)| h)
+                })
+                .unwrap_or_else(|| "npmrc 账号".to_string());
+        }
+        file.accounts.push(account);
+    }
+    write_accounts(&file)?;
+    Ok(file)
 }
 
 /// 生成账号的 .npmrc 凭据行，如 `//host:port/path/:_authToken=...`。
@@ -964,6 +1170,113 @@ fn update_user_path_for_node(target: &str) -> Result<(), String> {
     } else {
         Err(String::from_utf8_lossy(&out.stderr).to_string())
     }
+}
+
+/// 从用户级 PATH 中移除指向 `target` 目录（或其 `Scripts` 子目录）的条目。
+/// 仅精确匹配该版本目录，不影响 ServBay / 其它 node、Roaming\npm 等无关条目。
+fn remove_path_entries_for_target(target: &str) -> Result<bool, String> {
+    let scripts = format!("{}\\Scripts", target);
+    let entries = get_user_path_entries();
+    let before = entries.len();
+    let kept: Vec<String> = entries
+        .into_iter()
+        .filter(|e| {
+            let el = e.trim_end_matches('\\').to_lowercase();
+            el != target.to_lowercase() && el != scripts.to_lowercase()
+        })
+        .collect();
+    if kept.len() == before {
+        return Ok(false); // 没有条目被移除
+    }
+    set_user_path_entries(&kept)?;
+    Ok(true)
+}
+
+/// 卸载自管运行时版本（Node / Python 共用）。
+///
+/// 旧行为是硬护栏「不能卸载当前正在使用的版本」，导致唯一版本永远无法卸载。
+/// 现改为：若该版本正生效，先把它从用户 PATH 撤出再删目录（先修 PATH 后删，
+/// 绝不留悬空 PATH）；PATH 改成功但目录删除失败（常见于 exe 被占用）时返回
+/// 明确提示，此时 PATH 已安全、状态不悬空。
+fn uninstall_managed_version(
+    install_root: &str,
+    version: &str,
+    current_from_path: Option<String>,
+    label: &str,
+) -> Result<String, String> {
+    let target = format!("{}\\{}", install_root, version);
+    if !Path::new(&target).exists() {
+        return Err(format!("版本 {} 不存在", version));
+    }
+
+    let was_current = current_from_path.as_deref() == Some(version);
+    if was_current {
+        // 先从用户 PATH 停用（先修 PATH 后删目录，绝不留悬空条目）
+        remove_path_entries_for_target(&target)?;
+        // 撤完用户 PATH 后仍生效，说明条目在系统级 PATH（本工具只写用户 PATH）。
+        // 直接删会留下悬空系统条目，需管理员处理，故中止并给出可执行提示。
+        if detect_still_active(install_root, version) {
+            return Err(format!(
+                "{} 仍在系统级 PATH 中生效（本工具只管理用户 PATH）。\n\
+                 请以管理员身份从系统环境变量移除该条目后重试，或手动删除目录：\n{}",
+                label, target
+            ));
+        }
+    }
+
+    match delete_path_robust(Path::new(&target)) {
+        Ok(()) => {
+            if was_current {
+                Ok(format!("已卸载并停用 {}（已从 PATH 移除）\n{}", version, target))
+            } else {
+                Ok(target)
+            }
+        }
+        Err(e) => {
+            if was_current {
+                Err(format!(
+                    "已从 PATH 停用 {}，但目录删除失败（{} 可能正在运行，请关闭相关终端/进程后重试）：\n{}\n目录：{}",
+                    version, label, e, target
+                ))
+            } else {
+                Err(format!("删除失败（{} 可能正在运行，请关闭后重试）：{}", label, e))
+            }
+        }
+    }
+}
+
+/// 复查某版本是否仍在 User+Machine PATH 中生效（撤 PATH 后调用）。
+fn detect_still_active(install_root: &str, version: &str) -> bool {
+    let root_lower = install_root.to_lowercase();
+    let ver_lower = version.to_lowercase();
+    for dir in get_registry_path_entries() {
+        let p = Path::new(&dir);
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Scripts 子目录也算该版本生效
+        let (ver_name, parent_is_root) = if name.eq_ignore_ascii_case("Scripts") {
+            (
+                p.parent()
+                    .and_then(|pp| pp.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(""),
+                p.parent()
+                    .and_then(|pp| pp.parent())
+                    .map(|gp| gp.to_string_lossy().to_lowercase() == root_lower)
+                    .unwrap_or(false),
+            )
+        } else {
+            (
+                name,
+                p.parent()
+                    .map(|pa| pa.to_string_lossy().to_lowercase() == root_lower)
+                    .unwrap_or(false),
+            )
+        };
+        if parent_is_root && ver_name.to_lowercase() == ver_lower {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,6 +1607,8 @@ fn check_registry_package(registry: String, name: String) -> RegistryPackageChec
     let url = format!("{}/{}", u, name);
     let mut args: Vec<String> = vec![
         "-sS".into(),
+        // 内网私有源吊销服务器不可达时 schannel 报 CRYPT_E_NO_REVOCATION_CHECK，跳过吊销检查
+        "--ssl-no-revoke".into(),
         "-m".into(),
         "10".into(),
         "-w".into(),
@@ -1581,6 +1896,8 @@ fn install_node(app: tauri::AppHandle) -> Result<InstallResult, String> {
     let dir = install_specific(&version, |stage| {
         let _ = app.emit("install-progress", serde_json::json!({ "stage": stage }));
     })?;
+    // 安装后立即写入用户 PATH，否则 node 不可用、检测仍显示未安装。
+    update_user_path_for_node(&dir)?;
     let _ = app.emit("install-progress", serde_json::json!({ "stage": "done" }));
     Ok(InstallResult {
         ok: true,
@@ -1755,6 +2072,8 @@ fn install_version(app: tauri::AppHandle, version: String) -> Result<InstallResu
             serde_json::json!({ "stage": stage, "version": version }),
         );
     })?;
+    // 安装后立即写入用户 PATH，否则 node 不可用、检测仍显示未安装。
+    update_user_path_for_node(&dir)?;
     let _ = app.emit(
         "version-progress",
         serde_json::json!({ "stage": "done", "version": version }),
@@ -1913,18 +2232,12 @@ fn uninstall_nvm() -> Result<String, String> {
 
 #[tauri::command]
 fn uninstall_version(version: String) -> Result<String, String> {
-    let install_dir = node_install_root();
-    let target = format!("{}\\{}", install_dir, version);
-    if !Path::new(&target).exists() {
-        return Err(format!("版本 {} 不存在", version));
-    }
-    if let Some(cur) = current_version_from_path() {
-        if cur == version {
-            return Err("不能卸载当前正在使用的版本".to_string());
-        }
-    }
-    std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
-    Ok(target)
+    uninstall_managed_version(
+        &node_install_root(),
+        &version,
+        current_version_from_path(),
+        "Node",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1955,7 +2268,7 @@ fn find_in_path_entries(name: &str, entries: &[String]) -> Option<String> {
     None
 }
 
-fn pkg_data_dir(name: &str, user: &str, local: &str) -> String {
+fn pkg_default_data_dir(name: &str, user: &str, local: &str) -> String {
     match name {
         "pnpm" => format!("{}\\pnpm\\store", local),
         "yarn" => format!("{}\\Yarn", local),
@@ -1963,6 +2276,51 @@ fn pkg_data_dir(name: &str, user: &str, local: &str) -> String {
         "pm2" => format!("{}\\.pm2", user),
         "bun" => format!("{}\\.bun", user),
         _ => format!("{}\\.{}", user, name),
+    }
+}
+
+/// 读取用户级环境变量（注册表，不受当前进程过期环境影响）。
+fn get_user_env_var(key: &str) -> Option<String> {
+    let ps = format!("[Environment]::GetEnvironmentVariable('{}','User')", key);
+    run_cmd("powershell", &["-NoProfile", "-Command", &ps])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 写入/删除（value 为 None 时）用户级环境变量。
+fn set_user_env_var(key: &str, value: Option<&str>) -> Result<(), String> {
+    let ps = match value {
+        Some(v) => {
+            let escaped = v.replace('\'', "''");
+            format!("[Environment]::SetEnvironmentVariable('{}','{}','User')", key, escaped)
+        }
+        None => format!("[Environment]::SetEnvironmentVariable('{}',$null,'User')", key),
+    };
+    let out = new_cmd("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// 当前实际生效的数据目录：env/配置 覆盖默认。切换数据目录后据此显示新位置。
+fn pkg_actual_data_dir(name: &str, user: &str, local: &str) -> String {
+    match name {
+        "pm2" => get_user_env_var("PM2_HOME")
+            .unwrap_or_else(|| pkg_default_data_dir(name, user, local)),
+        "bun" => get_user_env_var("BUN_INSTALL")
+            .unwrap_or_else(|| pkg_default_data_dir(name, user, local)),
+        "yarn" => get_user_env_var("YARN_CACHE_FOLDER")
+            .unwrap_or_else(|| pkg_default_data_dir(name, user, local)),
+        "pnpm" => run_cmd("pnpm", &["store", "path"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| pkg_default_data_dir(name, user, local)),
+        _ => pkg_default_data_dir(name, user, local),
     }
 }
 
@@ -1982,7 +2340,7 @@ fn list_pkg_managers() -> Vec<PkgManagerInfo> {
             installed: bin.is_some(),
             version: None,
             bin_path: bin.clone(),
-            data_dir: Some(pkg_data_dir(name, &user, &local)),
+            data_dir: Some(pkg_actual_data_dir(name, &user, &local)),
         };
         if let Some(b) = &bin {
             // 版本命令：bun 用 --version，其余用 -v
@@ -2023,6 +2381,126 @@ fn install_pkg_manager(name: String, version: Option<String>) -> Result<String, 
     } else {
         Err(String::from_utf8_lossy(&out.stderr).to_string())
     }
+}
+
+/// 卸载包管理器并连带删除其数据/缓存目录。
+/// pnpm/yarn/cnpm/pm2 走 `npm uninstall -g`；bun 删 ~/.bun 并清 PATH/BUN_INSTALL。
+#[tauri::command]
+fn uninstall_pkg_manager(name: String) -> Result<String, String> {
+    let user = std::env::var("USERPROFILE").unwrap_or_default();
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let data_dir = pkg_actual_data_dir(&name, &user, &local);
+    let mut msgs: Vec<String> = Vec::new();
+
+    if name == "bun" {
+        // bun 是独立安装（默认 ~/.bun，可能被 BUN_INSTALL 重定向），不走 npm
+        let bin = format!("{}\\bin", data_dir);
+        let _ = remove_path_entries_for_target(&bin);
+        let _ = set_user_env_var("BUN_INSTALL", None);
+        delete_path_robust(Path::new(&data_dir))?;
+        return Ok(format!(
+            "已卸载 bun（已删除 {}、清理 PATH 与 BUN_INSTALL，重开终端生效）",
+            data_dir
+        ));
+    }
+
+    // npm 生态：npm uninstall -g（失败不阻断，仍尝试清理数据目录）
+    let out = new_cmd("npm.cmd")
+        .args(["uninstall", "-g", &name])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        msgs.push(format!("已卸载 {}", name));
+    } else {
+        msgs.push(format!(
+            "{} 卸载命令返回异常（可能本就未通过 npm 安装）：{}",
+            name,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    // 删除数据/缓存目录（cnpm 是 .cnpmrc 文件，delete_path_robust 兼容文件与目录）
+    if Path::new(&data_dir).exists() {
+        delete_path_robust(Path::new(&data_dir))
+            .map_err(|e| format!("{}（程序已卸载，但数据目录删除失败：{}）", msgs.join("；"), e))?;
+        msgs.push(format!("已删除数据目录 {}", data_dir));
+    }
+    // pm2 自定义过 PM2_HOME 时一并清掉
+    if name == "pm2" {
+        let _ = set_user_env_var("PM2_HOME", None);
+    }
+    Ok(msgs.join("；"))
+}
+
+/// 切换包管理器数据目录：迁移旧数据（robocopy /MOVE）并更新指向。
+/// pm2 用 PM2_HOME；bun 用 BUN_INSTALL；yarn 用 YARN_CACHE_FOLDER；pnpm 用 store-dir 配置。
+#[tauri::command]
+fn switch_pkg_data_dir(name: String, target: String) -> Result<String, String> {
+    let user = std::env::var("USERPROFILE").unwrap_or_default();
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let src = pkg_actual_data_dir(&name, &user, &local);
+    let target = target.trim().trim_end_matches('\\').to_string();
+    if target.is_empty() {
+        return Err("未选择目标目录".to_string());
+    }
+    if Path::new(&target).eq(Path::new(&src)) {
+        return Err("目标目录与当前数据目录相同".to_string());
+    }
+
+    // 1) 迁移旧数据：robocopy /MOVE /E，退出码 0-7 为成功，>=8 为失败
+    if Path::new(&src).exists() {
+        let _ = std::fs::create_dir_all(&target);
+        let rc = new_cmd("robocopy")
+            .args([&src, &target, "/E", "/MOVE", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS"])
+            .output()
+            .map_err(|e| format!("启动迁移失败：{}", e))?;
+        let code = rc.status.code().unwrap_or(-1);
+        if code >= 8 {
+            return Err(format!(
+                "数据迁移失败（robocopy 退出码 {}）：{}",
+                code,
+                String::from_utf8_lossy(&rc.stderr).trim()
+            ));
+        }
+        // /MOVE 通常已清空源；残留（锁文件等）兜底删除
+        let _ = delete_path_robust(Path::new(&src));
+    } else {
+        let _ = std::fs::create_dir_all(&target);
+    }
+
+    // 2) 更新指向
+    match name.as_str() {
+        "pm2" => set_user_env_var("PM2_HOME", Some(&target))?,
+        "bun" => {
+            // BUN_INSTALL 是安装根目录（含 bin\bun.exe），迁移后需把 PATH 从旧 bin 指到新 bin
+            set_user_env_var("BUN_INSTALL", Some(&target))?;
+            let old_bin = format!("{}\\bin", src);
+            let new_bin = format!("{}\\bin", target);
+            let _ = remove_path_entries_for_target(&old_bin);
+            let ps = format!(
+                "$d='{}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
+                 if(-not ($p -split ';' -contains $d)){{ [Environment]::SetEnvironmentVariable('Path', $p.TrimEnd(';')+';'+$d,'User') }}",
+                new_bin.replace('\'', "''")
+            );
+            let _ = new_cmd("powershell").args(["-NoProfile", "-Command", &ps]).output();
+        }
+        "yarn" => set_user_env_var("YARN_CACHE_FOLDER", Some(&target))?,
+        "pnpm" => {
+            let out = new_cmd("pnpm")
+                .args(["config", "set", "store-dir", &target])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(format!(
+                    "设置 pnpm store-dir 失败：{}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+        other => return Err(format!("{} 暂不支持切换数据目录", other)),
+    }
+
+    Ok(format!("{} 数据目录已切换到 {}（重开终端生效）", name, target))
 }
 
 // ---------------------------------------------------------------------------
@@ -2684,18 +3162,12 @@ fn switch_python_version(version: String) -> Result<String, String> {
 
 #[tauri::command]
 fn uninstall_python_version(version: String) -> Result<String, String> {
-    let install_dir = python_install_root();
-    let target = format!("{}\\{}", install_dir, version);
-    if !Path::new(&target).exists() {
-        return Err(format!("版本 {} 不存在", version));
-    }
-    if let Some(cur) = current_python_version_from_path() {
-        if cur == version {
-            return Err("不能卸载当前正在使用的版本".to_string());
-        }
-    }
-    std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
-    Ok(target)
+    uninstall_managed_version(
+        &python_install_root(),
+        &version,
+        current_python_version_from_path(),
+        "Python",
+    )
 }
 
 /// 读取 pip 全局 index-url。
@@ -3208,6 +3680,8 @@ pub fn run() {
             delete_account,
             switch_account,
             test_account,
+            scan_npmrc_credentials,
+            import_npmrc_credential,
             list_versions,
             install_version,
             switch_version,
@@ -3216,6 +3690,8 @@ pub fn run() {
             uninstall_nvm,
             list_pkg_managers,
             install_pkg_manager,
+            uninstall_pkg_manager,
+            switch_pkg_data_dir,
             inspect_project,
             apply_project,
             read_project_file,

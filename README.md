@@ -28,13 +28,13 @@
 ### Node.js
 | 模块 | 说明 |
 |---|---|
-| 环境诊断 | 检测 Node/npm 安装状态、版本、PATH、商店假命令、网络连通性 |
-| 镜像源 | 切换 npm registry（官方 / npmmirror / 自定义），测试连接（含自签名 HTTPS） |
-| Node 版本 | 安装/切换/卸载版本（每大版本取最新），nvm 检测与守卫，卸载 nvm 引导 |
-| 上传登录 | 管理 npm registry 账号（token / basic），多账号切换，whoami 认证验证 |
-| 包管理器 | 管理 pnpm / yarn / cnpm / pm2 / bun，安装/切换版本，显示安装位置与数据目录 |
+| 环境诊断 | 检测 Node/npm 安装状态、版本、PATH、商店假命令、网络连通性；安装完成后自动写 PATH 并自动重新检测 |
+| 镜像源 | 切换 npm registry（官方 / npmmirror / 自定义），测试连接（含自签名 HTTPS；内网源自动跳过 schannel 吊销检查） |
+| Node 版本 | 安装/切换/卸载版本（每大版本取最新），安装后自动加入用户 PATH，nvm 检测与守卫，卸载 nvm 引导 |
+| 上传登录 | 管理 npm registry 账号（token / basic），多账号切换，whoami 认证验证；新增账号 registry 留空即默认公网 npmjs；**自动扫描全局 `~/.npmrc` 中已有的外部账号**（npm login / 其它工具写入），实时检测连通性，一键「纳入管理」 |
+| 包管理器 | 管理 pnpm / yarn / cnpm / pm2 / bun：安装/切换版本、**卸载（连带清理数据目录）**、**切换数据目录（robocopy 迁移数据并改指向：pm2 `PM2_HOME`、bun `BUN_INSTALL`、yarn `YARN_CACHE_FOLDER`、pnpm store-dir）**，显示安装位置与实际数据目录 |
 | 项目管理 | 打开项目目录，解析 `.nvmrc` / `package.json` / 项目 `.npmrc` 要求，一键应用 Node 版本与包管理器 |
-| 发布 | 扫描 `packages/` 下可发布包（支持 monorepo），按上传登录账号发布到指定 registry，发布前可选构建 |
+| 发布 | 扫描 `packages/` 下可发布包（支持 monorepo），发布源默认提供「公网 npmjs」选项，点发布时自动扫描 `~/.npmrc` 凭据，按账号发布到指定 registry，发布前可选构建 |
 | 证书信任 | 探测自签名 HTTPS 证书，一键信任并写入 Node extra CA，管理已信任证书 |
 
 ### Python
@@ -49,8 +49,8 @@
 ### Git
 | 模块 | 说明 |
 |---|---|
-| 账号管理 | 读写 SSH config，管理多平台 Git 账号（GitHub/Gitee/GitLab 等） |
-| SSH 密钥 | 生成/查看公钥，一键复制，直达平台密钥管理页 |
+| 账号管理 | 读写 SSH config，管理多平台 Git 账号（GitHub/Gitee/GitLab 等）；列表提供切换/测试/SSH密钥/编辑/删除，「测试」以全屏加载 + 结果弹窗展示 SSH 连接成败与输出 |
+| SSH 密钥 | 不再单独占标签页：点账号的「SSH密钥」弹出悬浮框，查看私钥路径/公钥与 clone 指引，一键复制公钥、直达平台密钥管理页、生成密钥 |
 | 身份切换 | 一键切换全局或仓库级 Git 身份 |
 | 仓库同步 | 按远程地址匹配账号，`git pull --ff-only` |
 
@@ -132,10 +132,11 @@ publish-release.cmd
 
 ```
 ├── src/                  # 前端（HTML/CSS/JS）
-│   ├── index.html        # 主页面（Node 6 Tab + Git 4 Tab + Python 5 Tab）
+│   ├── index.html        # 主页面（Node 6 Tab + Git 3 子 Tab + Python 5 Tab；SSH 密钥改为账号列表弹窗）
 │   ├── styles.css        # 样式（双主题 CSS 变量）
 │   ├── main.js           # 前端逻辑
-│   └── backend.js        # Tauri invoke 桥接层
+│   ├── backend.js        # Tauri invoke 桥接层
+│   └── logo.png          # 侧栏 Logo（应用图标由 src-tauri/icons/ 生成）
 ├── src-tauri/            # Rust 后端
 │   ├── src/lib.rs        # 命令注册 + Node/Python/镜像/账号/版本/包管理器/项目/发布命令
 │   ├── src/bin/devenv.rs # CLI 入口
