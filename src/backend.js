@@ -142,6 +142,18 @@
       return { active: null, accounts: [] };
     },
 
+    async scanNpmrcCredentials() {
+      if (IS_TAURI) return _invoke("scan_npmrc_credentials");
+      await _delay(600);
+      return [];
+    },
+
+    async importNpmrcCredential(registry) {
+      if (IS_TAURI) return _invoke("import_npmrc_credential", { registry });
+      await _delay(300);
+      return { active: null, accounts: [] };
+    },
+
     async saveAccount(account) {
       if (IS_TAURI) return _invoke("save_account", { account });
       await _delay(200);
@@ -419,6 +431,27 @@
       if (IS_TAURI) return _invoke("install_pkg_manager", { name, version });
       await _delay(800);
       return `${name}@${version || "latest"} 已安装（模拟）`;
+    },
+
+    async uninstallPkgManager(name) {
+      if (IS_TAURI) return _invoke("uninstall_pkg_manager", { name });
+      await _delay(600);
+      return `${name} 已卸载（模拟）`;
+    },
+
+    async switchPkgDataDir(name, target) {
+      if (IS_TAURI) return _invoke("switch_pkg_data_dir", { name, target });
+      await _delay(600);
+      return `${name} 数据目录已切换到 ${target}（模拟）`;
+    },
+
+    async pickFolder(title = "选择目录") {
+      if (IS_TAURI && window.__TAURI__.dialog) {
+        const sel = await window.__TAURI__.dialog.open({ directory: true, title });
+        return typeof sel === "string" ? sel : "";
+      }
+      await _delay(100);
+      return "";
     },
 
     /* ---------------- 项目管理 ---------------- */
