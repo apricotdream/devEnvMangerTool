@@ -1,10 +1,10 @@
 # DevEnvManager · 开发环境管理工具
 
-一款本地桌面 GUI 工具，统一管理开发环境：**Node.js 环境体检/版本切换/镜像源/包管理器/发布账号/项目级管理/包发布**、**Python 版本管理/pip 镜像/包管理器**，以及 **Git 多账号/SSH 密钥/身份切换/仓库同步**。附赠 `devenv` CLI（无 GUI 版本）。
+一款本地桌面 GUI 工具，统一管理开发环境：**Node.js 环境体检/版本切换/镜像源/包管理器/发布账号/项目级管理/包发布**、**Python 版本管理/pip 镜像/包管理器**，以及 **Git 环境检测/一键安装·卸载·版本管理/多账号/SSH 密钥/身份切换/仓库同步**。附赠 `devenv` CLI（无 GUI 版本）。
 
 基于 **Rust + Tauri 2** 构建，前端使用原生 HTML/CSS/JS（无构建工具依赖）。
 
-> **当前版本：v0.2.2-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
+> **当前版本：v0.2.3-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
 
 ## 快速开始（免 Rust 环境）
 
@@ -12,10 +12,10 @@
 
 | 文件 | 用途 |
 |---|---|
-| `DevEnvManager_0.2.2-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
-| `devenv-cli-0.2.2-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
+| `DevEnvManager_0.2.3-beta_x64-setup.exe` | 桌面 GUI，双击安装后从开始菜单启动 |
+| `devenv-cli-0.2.3-beta-windows-x64.zip` | 命令行工具（内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
 
-使用过程中，**无需安装 Rust / Node / Python**——工具会自行检测、下载并管理它们。仅 Git 模块需要本机有 Git + OpenSSH（缺失时应用内会引导安装）。
+使用过程中，**无需预装 Rust / Node / Python / Git**——工具会自行检测，缺失时在应用内一键下载并托管安装（Git 走 npmmirror 镜像的 MinGit，免管理员权限）；需要 Git Bash / 右键菜单时也可一键打开官网完整安装包。
 
 ### 系统要求
 
@@ -49,6 +49,7 @@
 ### Git
 | 模块 | 说明 |
 |---|---|
+| 环境诊断 | 检测 Git/OpenSSH 安装状态、版本、可执行路径（含不在 PATH 的 Git for Windows）；缺失时一键**托管安装 MinGit**（npmmirror 镜像、zip 解压到用户目录、免 UAC、自动写 PATH），支持**安装/切换版本**（最新 3 个稳定版）与**卸载**；另提供官网完整安装包（含 Git Bash/右键菜单）兜底入口。仅卸载本工具托管的 MinGit，不触碰系统独立安装的 Git |
 | 账号管理 | 读写 SSH config，管理多平台 Git 账号（GitHub/Gitee/GitLab 等）；列表提供切换/测试/SSH密钥/编辑/删除，「测试」以全屏加载 + 结果弹窗展示 SSH 连接成败与输出 |
 | SSH 密钥 | 不再单独占标签页：点账号的「SSH密钥」弹出悬浮框，查看私钥路径/公钥与 clone 指引，一键复制公钥、直达平台密钥管理页、生成密钥 |
 | 身份切换 | 一键切换全局或仓库级 Git 身份 |
@@ -132,7 +133,7 @@ publish-release.cmd
 
 ```
 ├── src/                  # 前端（HTML/CSS/JS）
-│   ├── index.html        # 主页面（Node 6 Tab + Git 3 子 Tab + Python 5 Tab；SSH 密钥改为账号列表弹窗）
+│   ├── index.html        # 主页面（Node 6 Tab + Git 4 子 Tab（含环境诊断） + Python 5 Tab；SSH 密钥改为账号列表弹窗）
 │   ├── styles.css        # 样式（双主题 CSS 变量）
 │   ├── main.js           # 前端逻辑
 │   ├── backend.js        # Tauri invoke 桥接层
@@ -147,6 +148,17 @@ publish-release.cmd
 ├── publish-release.cmd   # 一键发版脚本（构建 + 打 tag + 建 Gitee release 传包）
 └── docs/screenshot.png   # 界面截图
 ```
+
+## 更新日志
+
+### v0.2.3-beta
+- **Git 环境诊断（新 Tab）**：进入 Git 页默认显示「环境诊断」，检测 Git / OpenSSH 的安装状态、版本与可执行路径（含不在 PATH 中的 Git for Windows），支持「重新检测」。
+- **Git 一键安装 / 卸载 / 版本管理**：缺失时从 npmmirror 镜像托管安装 MinGit（zip 解压到用户目录、免 UAC、自动写 PATH）；可在最新 3 个稳定版中选择安装/更新；支持卸载本工具托管的 MinGit（自动撤出 PATH，不触碰系统独立安装的完整 Git for Windows）。另提供官网完整安装包（含 Git Bash / 右键菜单）兜底入口。
+- 修复 re-spin 版本（如 `v2.55.0.windows.5`）MinGit 文件名带第 4 段版本号导致下载 404 的问题：改为从镜像目录索引解析真实安装包文件名。
+- 切换左侧导航标签时自动清空控制台日志。
+
+### v0.2.2-beta
+- Git 模块交互优化：SSH 密钥改为账号弹窗、测试连接结果反馈、导航对勾跟随。
 
 ## 截图
 

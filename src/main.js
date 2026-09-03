@@ -555,7 +555,83 @@
     $$("#gitTabBar .tab-item").forEach((t) => t.classList.toggle("active", t.dataset.gtab == n));
     $$(".git-panel").forEach((p) => p.classList.add("hidden"));
     $("#gitPanel" + n).classList.remove("hidden");
+    if (n == 0) loadGitDiagnose();
     if (n == 1) loadGitAccounts();
+  }
+
+  // 环境诊断 Tab：检测 Git/OpenSSH 状态并渲染，缺失时内嵌安装入口
+  async function loadGitDiagnose() {
+    let info;
+    try {
+      info = await window.Backend.detectGit();
+    } catch (e) {
+      log("warn", `Git 环境检测失败: ${e.message || e}`);
+      return;
+    }
+    const setStatus = (spanId, ok, okText, badText) => {
+      const span = $(spanId);
+      const d = span.parentElement.querySelector(".state-dot");
+      if (d) d.className = `state-dot ${ok ? "ok" : "err"}`;
+      span.textContent = ok ? okText : badText;
+    };
+    setStatus("#gitDiInstalled", info.installed, "已安装", "未安装");
+    $("#gitDiVersion").textContent = info.version || "-";
+    setStatus("#gitDiSsh", info.sshInstalled, "已就绪", "缺失");
+    $("#gitDiPath").textContent = info.path || "-";
+
+    const area = $("#gitDiInstallArea");
+    area.innerHTML = "";
+    if (!info.installed) {
+      const btn = document.createElement("button");
+      btn.className = "btn btn-primary btn-block";
+      btn.style.marginTop = "10px";
+      btn.textContent = "安装 Git";
+      btn.addEventListener("click", openGitInstallModal);
+      area.appendChild(btn);
+      appendFullInstallerLink(area);
+      return;
+    }
+    // 已安装：版本管理（装新版即更新覆盖）+ 卸载（仅本工具托管的 MinGit）
+    const actions = document.createElement("div");
+    actions.className = "fix-actions";
+    actions.style.marginTop = "10px";
+    const upd = document.createElement("button");
+    upd.className = "btn btn-ghost btn-block";
+    upd.textContent = "安装 / 切换版本";
+    upd.addEventListener("click", openGitInstallModal);
+    actions.appendChild(upd);
+    if (info.managed) {
+      const un = document.createElement("button");
+      un.className = "btn btn-danger btn-block";
+      un.textContent = "卸载 Git";
+      un.addEventListener("click", uninstallGit);
+      actions.appendChild(un);
+    }
+    area.appendChild(actions);
+    if (!info.sshInstalled) {
+      const note = document.createElement("div");
+      note.className = "hint";
+      note.style.marginTop = "8px";
+      note.textContent = "已检测到 Git，但未找到 OpenSSH，建议安装完整 Git for Windows。";
+      area.appendChild(note);
+      appendFullInstallerLink(area);
+    }
+  }
+
+  async function uninstallGit() {
+    const ok = await showModal(
+      "确认卸载",
+      "将删除本工具安装的 MinGit 并从用户 PATH 移除。\n\n系统独立安装的 Git for Windows 不受影响。此操作不可恢复。",
+      "卸载",
+    );
+    if (!ok) return;
+    try {
+      const dir = await withFullscreenLoading("卸载 Git 中…", () => window.Backend.uninstallGit());
+      log("info", `已卸载托管 Git: ${dir}`);
+      loadGitDiagnose();
+    } catch (e) {
+      log("err", `卸载失败: ${e && e.message ? e.message : e}`);
+    }
   }
 
   // 顶部栏随左侧导航页面切换
@@ -565,9 +641,9 @@
     if (page === "git") {
       title.textContent = "Git 环境";
       subtitle.textContent = "账号 · SSH · 身份 · 仓库同步";
-      window.Backend.gitCheckEnv().then((env) => {
+      window.Backend.detectGit().then((info) => {
         const pill = els.healthPill;
-        if (env.git && env.ssh) {
+        if (info.installed && info.sshInstalled) {
           pill.className = "pill pill-ok";
           pill.textContent = "● 已就绪";
         } else {
@@ -1051,27 +1127,34 @@
       const keys = accounts.filter((a) => a.keyPath).length;
       els.gitOvKeys.textContent = keys + " 个";
       // git/ssh 检测
-      const env = await window.Backend.gitCheckEnv();
-      els.gitOvEnv.textContent = env.git && env.ssh ? "已就绪" : "缺失";
-      gitEnvCheck();
+      const info = await window.Backend.detectGit();
+      els.gitOvEnv.textContent = info.installed && info.sshInstalled ? "已就绪" : "缺失";
+      gitEnvCheck(info);
     } catch (e) {
       log("err", `加载 Git 账号失败: ${e.message}`);
     }
   }
 
-  async function gitEnvCheck() {
+  // info 缺省为 null 时自行检测；缺 Git 时在横幅里给出一键安装入口
+  async function gitEnvCheck(info = null) {
     try {
-      const env = await window.Backend.gitCheckEnv();
+      if (!info) info = await window.Backend.detectGit();
       const banner = els.gitEnvBanner;
-      if (!env.git || !env.ssh) {
-        const missing = [];
-        if (!env.git) missing.push("Git");
-        if (!env.ssh) missing.push("OpenSSH");
-        banner.textContent =
-          `⚠ 未检测到 ${missing.join("、")}。安装方式：` +
-          `Windows → winget install Git.Git（SSH 在 Git 自带里）；` +
-          `macOS → brew install git openssh；` +
-          `Linux → sudo apt install git openssh-client`;
+      if (!info.installed) {
+        banner.innerHTML = "";
+        const msg = document.createElement("span");
+        msg.textContent = "⚠ 未检测到 Git。";
+        const btn = document.createElement("button");
+        btn.className = "btn btn-mini btn-primary";
+        btn.style.marginLeft = "8px";
+        btn.textContent = "安装 Git";
+        btn.addEventListener("click", openGitInstallModal);
+        banner.appendChild(msg);
+        banner.appendChild(btn);
+        banner.classList.remove("hidden");
+      } else if (!info.sshInstalled) {
+        // Git 已装但缺 ssh（MinGit 自带 ssh，正常不会触发）
+        banner.textContent = "⚠ 已检测到 Git，但未找到 OpenSSH，建议安装完整 Git for Windows。";
         banner.classList.remove("hidden");
       } else {
         banner.classList.add("hidden");
@@ -1079,6 +1162,115 @@
     } catch (e) {
       log("warn", `Git 环境检测: ${e.message}`);
     }
+  }
+
+  // 弹窗：列出最新 3 个稳定版，支持 MinGit 一键托管安装（免 UAC），附完整安装包兜底链接
+  async function openGitInstallModal() {
+    modalState = { kind: "confirm", resolve: () => {} };
+    openModal({ title: "安装 Git", width: "form" });
+    els.modalBody.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.innerHTML =
+      '<div class="empty" style="padding:12px">正在获取最新版本…</div>';
+    els.modalBody.appendChild(wrap);
+    renderActions([{ text: "关闭", cls: "btn-ghost", onClick: closeModal }]);
+
+    let releases;
+    try {
+      releases = await window.Backend.gitVersions();
+    } catch (e) {
+      wrap.innerHTML = "";
+      const err = document.createElement("div");
+      err.className = "empty";
+      err.style.padding = "12px";
+      err.textContent = `获取版本失败: ${e.message || e}`;
+      wrap.appendChild(err);
+      appendFullInstallerLink(wrap);
+      return;
+    }
+
+    wrap.innerHTML = "";
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.marginBottom = "8px";
+    hint.textContent = "来源：淘宝 npmmirror 镜像 · MinGit 免 UAC 托管安装";
+    wrap.appendChild(hint);
+
+    const list = document.createElement("div");
+    list.className = "version-list";
+    if (!releases || !releases.length) {
+      list.innerHTML = '<div class="empty">无法获取可用版本</div>';
+    } else {
+      releases.forEach((r) => {
+        const item = document.createElement("div");
+        item.className = "version-item";
+        item.innerHTML =
+          `<span class="ver mono">${escapeHtml(r.version)}</span>` +
+          `<span class="ver-actions"><button class="btn btn-mini btn-primary" data-ver="${escapeHtml(r.version)}" data-tag="${escapeHtml(r.tag)}">安装</button></span>`;
+        list.appendChild(item);
+      });
+      list.addEventListener("click", (e) => {
+        const b = e.target.closest("button[data-ver]");
+        if (b) installGitVersion(b.dataset.ver, b.dataset.tag);
+      });
+    }
+    wrap.appendChild(list);
+
+    // 进度区
+    const prog = document.createElement("div");
+    prog.className = "progress-area hidden";
+    prog.style.marginTop = "10px";
+    prog.innerHTML =
+      '<div class="progress-track"><div class="progress-fill" style="width:0%"></div></div>' +
+      '<div class="progress-meta"><span class="ptext">准备中…</span><span class="ppct mono">…</span></div>';
+    wrap.appendChild(prog);
+
+    appendFullInstallerLink(wrap);
+
+    function installGitVersion(version, tag) {
+      const fill = prog.querySelector(".progress-fill");
+      const ptext = prog.querySelector(".ptext");
+      const ppct = prog.querySelector(".ppct");
+      prog.classList.remove("hidden");
+      list.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      window.Backend.installGitVersion(version, tag, {
+        onProgress: (stage) => {
+          const text = { connecting: "连接镜像源…", downloading: "下载中…", extracting: "解压中…", done: "完成" }[stage] || "…";
+          fill.style.width = stage === "done" ? "100%" : "55%";
+          ptext.textContent = text;
+          ppct.textContent = stage === "done" ? "100%" : "…";
+        },
+      }).then((dir) => {
+        log("info", `Git ${version} 安装完成: ${dir}`);
+        fill.style.width = "100%";
+        ptext.textContent = "安装完成";
+        ppct.textContent = "100%";
+        // 应用内检测走候选路径，已能直接发现；终端 PATH 需重开
+        showModal("安装完成", `Git ${version} 已安装。\n\n应用内已可直接使用；新开终端请重开以加载 PATH。`, "好的");
+        loadGitAccounts();
+        loadGitDiagnose();
+      }).catch((err) => {
+        log("err", `Git 安装失败: ${err}`);
+        ptext.textContent = `安装失败: ${err && err.message ? err.message : err}`;
+        ppct.textContent = "";
+        list.querySelectorAll("button").forEach((b) => (b.disabled = false));
+      });
+    }
+  }
+
+  // 完整安装包兜底：开浏览器到 Git for Windows 下载页（含 Git Bash / 右键菜单）
+  function appendFullInstallerLink(wrap) {
+    const a = document.createElement("a");
+    a.href = "#";
+    a.className = "modal-link";
+    a.style.display = "inline-block";
+    a.style.marginTop = "10px";
+    a.textContent = "需要 Git Bash / 右键菜单？下载完整安装包（官网）";
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      window.Backend.gitOpenUrl("https://git-scm.com/download/win");
+    });
+    wrap.appendChild(a);
   }
 
   function renderGitAccounts(accounts) {
@@ -2995,6 +3187,7 @@
     $$(".nav-item").forEach((item) => {
       item.addEventListener("click", () => {
         const page = item.dataset.page;
+        els.console.innerHTML = ""; // 切换导航时清空控制台
         $$(".nav-item").forEach((n) => n.classList.toggle("active", n === item));
         if (page === "node") {
           els.tabBar.classList.remove("hidden");
@@ -3009,7 +3202,7 @@
           $$(".tab-panel").forEach((p) => p.classList.add("hidden"));
           $("#tabPanel5").classList.remove("hidden");
           setPageTopbar("git");
-          activateGitTab(1);
+          activateGitTab(0);
         } else if (page === "python") {
           els.tabBar.classList.add("hidden");
           els.gitTabBar.classList.add("hidden");
@@ -3023,6 +3216,8 @@
 
     // Git Tab 按钮
     els.btnGitRefresh.addEventListener("click", loadGitAccounts);
+    $("#btnGitRedetect").addEventListener("click", () =>
+      withFullscreenLoading("检测中…", () => loadGitDiagnose()).catch(() => {}));
     els.btnGitAdd.addEventListener("click", () => openGitAccountModal(null));
     els.gitAccountList.addEventListener("click", onGitAccountAction);
     els.btnGitSyncRepo.addEventListener("click", gitSyncRepo);

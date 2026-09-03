@@ -3545,6 +3545,219 @@ fn install_python_pkg_manager(name: String, version: Option<String>) -> Result<S
 }
 
 // ---------------------------------------------------------------------------
+// Git 环境检测 / 安装（仅 Windows，MinGit 托管安装，数据源 npmmirror）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitEnvInfo {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+    pub ssh_installed: bool,
+    /// 本工具托管的 MinGit（位于自管根目录且非完整 Git for Windows），可一键卸载。
+    pub managed: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRelease {
+    /// 裸版本号，如 2.49.0
+    pub version: String,
+    /// 镜像目录 tag，如 v2.49.0.windows.1
+    pub tag: String,
+}
+
+/// Git for Windows 自管安装根（与 platform.rs 探测的 LocalAppData\Programs\Git 一致）。
+fn git_install_root() -> String {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    format!("{}\\Programs\\Git", local)
+}
+
+/// 定位 git：优先 PATH，其次 Git-for-Windows / 自管安装目录候选（不在 PATH 也能发现）。
+fn find_git() -> Option<PathBuf> {
+    use crate::gitcore::platform;
+    let env: &dyn Fn(&str) -> Option<String> = &|k| std::env::var(k).ok();
+    if let Some(p) = platform::which(env, "git") {
+        return Some(p);
+    }
+    let home = dirs::home_dir().unwrap_or_default();
+    platform::command_candidates("git", platform::current_platform_name(), env, &home)
+        .into_iter()
+        .find(|p| p.exists())
+}
+
+/// 检测 Git / OpenSSH：安装状态、版本、可执行路径。
+#[tauri::command]
+fn detect_git() -> GitEnvInfo {
+    use crate::gitcore::platform;
+    let env: &dyn Fn(&str) -> Option<String> = &|k| std::env::var(k).ok();
+    let mut info = GitEnvInfo::default();
+    info.ssh_installed = platform::which(env, "ssh").is_some()
+        || platform::command_candidates("ssh", platform::current_platform_name(), env, &dirs::home_dir().unwrap_or_default())
+            .iter()
+            .any(|p| p.exists());
+    if let Some(exe) = find_git() {
+        info.path = Some(exe.to_string_lossy().to_string());
+        if let Some(out) = run_cmd(&exe.to_string_lossy(), &["--version"]) {
+            info.version = Some(out);
+            info.installed = true;
+        }
+        // 托管判定：git.exe 在自管根目录下，且不是完整 Git for Windows（无 git-bash.exe）。
+        let root = PathBuf::from(git_install_root());
+        let exe_norm = exe.to_string_lossy().replace('/', "\\");
+        let root_norm = root.to_string_lossy().replace('/', "\\");
+        if exe_norm.to_lowercase().starts_with(&root_norm.to_lowercase())
+            && !root.join("git-bash.exe").exists()
+        {
+            info.managed = true;
+        }
+    }
+    info
+}
+
+/// 从 npmmirror 镜像目录索引解析最新 3 个稳定版 Git for Windows。
+/// 取 vX.Y.Z.windows.N 形式（跳过 -rc / mingit-prerelease / untagged），
+/// 每个 X.Y.Z 保留最高 re-spin N，按版本降序取前 3。
+fn fetch_git_releases() -> Vec<GitRelease> {
+    let html = run_cmd(
+        "curl.exe",
+        &["-s", "-m", "15", "https://registry.npmmirror.com/-/binary/git-for-windows/"],
+    )
+    .unwrap_or_default();
+    parse_git_releases(&html)
+}
+
+/// 解析镜像目录索引为最新 3 个稳定版。纯函数，便于测试。
+fn parse_git_releases(html: &str) -> Vec<GitRelease> {
+    // ponytail: 单次正则 + HashMap 取最高 re-spin；release 数量小（百级），O(n) 扫描足够
+    let re = regex::Regex::new(r#"v(\d+)\.(\d+)\.(\d+)\.windows\.(\d+)/"#).unwrap();
+    let mut best: std::collections::HashMap<(i32, i32, i32), i32> = std::collections::HashMap::new();
+    for cap in re.captures_iter(html) {
+        let key = (
+            cap[1].parse().unwrap_or(0),
+            cap[2].parse().unwrap_or(0),
+            cap[3].parse().unwrap_or(0),
+        );
+        let n: i32 = cap[4].parse().unwrap_or(0);
+        let e = best.entry(key).or_insert(0);
+        if n > *e {
+            *e = n;
+        }
+    }
+    let mut keys: Vec<(i32, i32, i32)> = best.keys().cloned().collect();
+    keys.sort_unstable();
+    keys.reverse();
+    keys.iter()
+        .take(3)
+        .map(|&(a, b, c)| {
+            let n = best[&(a, b, c)];
+            GitRelease {
+                version: format!("{}.{}.{}", a, b, c),
+                tag: format!("v{}.{}.{}.windows.{}", a, b, c, n),
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn git_versions() -> Vec<GitRelease> {
+    fetch_git_releases()
+}
+
+/// 从某 tag 目录索引中解析标准 64 位 MinGit zip 的真实文件名（排除 busybox/32位/arm64）。
+/// re-spin（windows.N, N>1）资产名带第 4 段版本号（MinGit-2.55.0.5-64-bit.zip），
+/// windows.1 则不带（MinGit-2.49.0-64-bit.zip），故不能用 version 拼，必须读索引。纯函数便于测试。
+fn parse_mingit_asset(html: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"MinGit-[0-9.]+-64-bit\.zip"#).unwrap();
+    // busybox 变体为 MinGit-<ver>-busybox-64-bit.zip，其版本号后紧跟 -busybox 而非 -64-bit，不会命中
+    re.find(html).map(|m| m.as_str().to_string())
+}
+
+fn fetch_mingit_asset(tag: &str) -> Result<String, String> {
+    let url = format!("https://registry.npmmirror.com/-/binary/git-for-windows/{}/", tag);
+    let html = run_cmd("curl.exe", &["-s", "-m", "15", &url])
+        .ok_or_else(|| "获取 Git 版本文件列表失败".to_string())?;
+    parse_mingit_asset(&html).ok_or_else(|| format!("版本 {} 未找到 64 位 MinGit 安装包", tag))
+}
+
+/// 下载并解压 MinGit（真 zip，免 UAC）到自管安装根。MinGit zip 无顶层目录，直接解到根。
+fn install_git(version: &str, tag: &str, emit: impl Fn(&str)) -> Result<String, String> {
+    let root = git_install_root();
+    let _ = std::fs::create_dir_all(&root);
+    let zip_path = format!("{}\\mingit.zip", root);
+    let asset = fetch_mingit_asset(tag)?;
+    let url = format!(
+        "https://registry.npmmirror.com/-/binary/git-for-windows/{}/{}",
+        tag, asset
+    );
+
+    emit("downloading");
+    let _ = std::fs::remove_file(&zip_path);
+    run_cmd("curl.exe", &["-L", "-s", "-o", &zip_path, &url]);
+    let zip = Path::new(&zip_path);
+    if !zip.exists() {
+        return Err("下载 Git 失败（curl 未生成文件）".to_string());
+    }
+    // 镜像对错误 URL 回 404 JSON/HTML 而非 zip，校验 PK 魔数以区分「下载失败」与「解压失败」。
+    use std::io::Read;
+    let mut header = [0u8; 4];
+    std::fs::File::open(zip)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .map_err(|e| format!("读取下载文件失败：{}", e))?;
+    if header != [0x50, 0x4B, 0x03, 0x04] {
+        let _ = std::fs::remove_file(&zip_path);
+        return Err(format!("下载 Git 失败：服务器未返回有效 zip（版本 {} 可能不存在）", version));
+    }
+
+    emit("extracting");
+    let out = new_cmd("tar.exe")
+        .args(["-xf", &zip_path, "-C", &root])
+        .output()
+        .map_err(|e| format!("启动 tar 解压失败：{}", e))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&zip_path);
+        return Err(format!("解压 Git 失败：{}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let _ = std::fs::remove_file(&zip_path);
+    if !Path::new(&format!("{}\\cmd\\git.exe", root)).exists() {
+        return Err("解压 Git 失败：未找到 cmd\\git.exe".to_string());
+    }
+    Ok(root)
+}
+
+#[tauri::command]
+fn install_git_version(app: tauri::AppHandle, version: String, tag: String) -> Result<String, String> {
+    use tauri::Emitter;
+    let _ = app.emit("git-install-progress", serde_json::json!({ "stage": "connecting" }));
+    let dir = install_git(&version, &tag, |stage| {
+        let _ = app.emit("git-install-progress", serde_json::json!({ "stage": stage }));
+    })?;
+    // 写入用户 PATH（cmd 目录），让新开终端可用 git；应用内检测走候选路径，无需重启即能发现。
+    fix_path(format!("{}\\cmd", dir))?;
+    let _ = app.emit("git-install-progress", serde_json::json!({ "stage": "done" }));
+    Ok(dir)
+}
+
+/// 卸载托管的 MinGit：先从用户 PATH 撤出 cmd 目录，再删安装根。
+/// 只作用于自管根目录；检测到完整 Git for Windows（有 git-bash.exe）则拒绝，避免误删用户环境。
+#[tauri::command]
+fn uninstall_git() -> Result<String, String> {
+    let root = git_install_root();
+    let root_path = Path::new(&root);
+    if !root_path.join("cmd").join("git.exe").exists() {
+        return Err("托管目录中未找到 Git，无可卸载".to_string());
+    }
+    if root_path.join("git-bash.exe").exists() {
+        return Err("检测到完整 Git for Windows，本工具不代为卸载，请通过系统「应用与功能」卸载".to_string());
+    }
+    // 先修 PATH 后删目录，绝不留悬空条目
+    remove_path_entries_for_target(&format!("{}\\cmd", root))?;
+    delete_path_robust(root_path)?;
+    Ok(root)
+}
+
+// ---------------------------------------------------------------------------
 // CLI API（无 GUI 版本复用，不含 #[tauri::command] 宏）
 // ---------------------------------------------------------------------------
 
@@ -3729,8 +3942,65 @@ pub fn run() {
             git_cmds::git_open_in_manager,
             git_cmds::git_open_url,
             git_cmds::git_check_env,
+            detect_git,
+            git_versions,
+            install_git_version,
+            uninstall_git,
             list_config_dirs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod git_release_tests {
+    use super::parse_git_releases;
+
+    #[test]
+    fn picks_latest_three_stable_and_highest_respin() {
+        // 模拟镜像索引：含 re-spin、rc、mingit-prerelease、untagged，应全部正确处理
+        let html = r#"
+            {"name":"v2.47.1.windows.1/"}
+            {"name":"v2.49.0.windows.1/"}
+            {"name":"v2.49.0.windows.2/"}
+            {"name":"v2.53.0.windows.1/"}
+            {"name":"v2.53.0.windows.4/"}
+            {"name":"v2.55.0.windows.5/"}
+            {"name":"v2.54.0-rc1.windows.1/"}
+            {"name":"v2.11.1.mingit-prerelease.6/"}
+            {"name":"untagged-8231769e9b878a01c378/"}
+        "#;
+        let releases = parse_git_releases(html);
+        assert_eq!(releases.len(), 3);
+        assert_eq!(releases[0].version, "2.55.0");
+        assert_eq!(releases[0].tag, "v2.55.0.windows.5");
+        assert_eq!(releases[1].tag, "v2.53.0.windows.4"); // 取最高 re-spin
+        assert_eq!(releases[2].tag, "v2.49.0.windows.2"); // 取最高 re-spin
+    }
+
+    #[test]
+    fn empty_index_yields_nothing() {
+        assert!(parse_git_releases("").is_empty());
+    }
+
+    #[test]
+    fn mingit_asset_picks_standard_64bit_including_respin_revision() {
+        // re-spin 资产名带第 4 段版本号；必须排除 busybox / 32位 / arm64
+        let html = r#"
+            {"name":"Git-2.55.0.5-64-bit.exe"}
+            {"name":"MinGit-2.55.0.5-32-bit.zip"}
+            {"name":"MinGit-2.55.0.5-64-bit.zip"}
+            {"name":"MinGit-2.55.0.5-arm64.zip"}
+            {"name":"MinGit-2.55.0.5-busybox-64-bit.zip"}
+            {"name":"PortableGit-2.55.0.5-64-bit.7z.exe"}
+        "#;
+        assert_eq!(parse_mingit_asset(html).as_deref(), Some("MinGit-2.55.0.5-64-bit.zip"));
+
+        // windows.1（无第 4 段）也能解析
+        let html1 = r#"{"name":"MinGit-2.49.0-64-bit.zip"}"#;
+        assert_eq!(parse_mingit_asset(html1).as_deref(), Some("MinGit-2.49.0-64-bit.zip"));
+
+        // 只有 busybox / arm64 时不应误判
+        assert_eq!(parse_mingit_asset(r#"{"name":"MinGit-2.55.0.5-busybox-64-bit.zip"}"#), None);
+    }
 }

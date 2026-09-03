@@ -88,7 +88,8 @@
 
       <!-- Git 页的 Tab 栏（仅 Git 页显示） -->
       <nav class="tab-bar hidden" id="gitTabBar">
-        <button class="tab-item active" data-gtab="1">账号管理</button>
+        <button class="tab-item active" data-gtab="0">环境诊断</button>
+        <button class="tab-item" data-gtab="1">账号管理</button>
         <button class="tab-item" data-gtab="3">身份切换</button>
         <button class="tab-item" data-gtab="4">仓库同步</button>
       </nav>
@@ -519,8 +520,38 @@
       <!-- Git 页（拆分为 4 个子 Tab） -->
       <section class="tab-panel hidden" id="tabPanel5">
 
+        <!-- 子 Tab 0: 环境诊断 -->
+        <div class="git-panel" id="gitPanel0">
+          <div class="cards overview">
+            <div class="card overview-item">
+              <div class="overview-label">安装状态</div>
+              <div class="overview-value"><span class="state-dot neutral"></span><span id="gitDiInstalled">待检测</span></div>
+            </div>
+            <div class="card overview-item">
+              <div class="overview-label">Git 版本</div>
+              <div class="overview-value mono" id="gitDiVersion">-</div>
+            </div>
+            <div class="card overview-item">
+              <div class="overview-label">OpenSSH</div>
+              <div class="overview-value"><span class="state-dot neutral"></span><span id="gitDiSsh">待检测</span></div>
+            </div>
+            <div class="card overview-item">
+              <div class="overview-label">可执行路径</div>
+              <div class="overview-value mono" id="gitDiPath" style="font-size:12px;word-break:break-all">-</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>Git 环境</h3>
+              <button id="btnGitRedetect" class="btn btn-mini btn-ghost">重新检测</button>
+            </div>
+            <div id="gitDiInstallArea"></div>
+          </div>
+        </div>
+
         <!-- 子 Tab 1: 账号管理 -->
-        <div class="git-panel" id="gitPanel1">
+        <div class="git-panel hidden" id="gitPanel1">
           <div id="gitEnvBanner" class="nvm-banner hidden"></div>
 
           <div class="cards overview">

@@ -391,6 +391,52 @@
       return null;
     },
 
+    /* ---------------- Git 环境检测 / 安装（MinGit 托管，仅 Windows） ---------------- */
+
+    async detectGit() {
+      if (IS_TAURI) return _invoke("detect_git");
+      await _delay(100);
+      return { installed: false, version: null, path: null, sshInstalled: false };
+    },
+
+    async gitVersions() {
+      if (IS_TAURI) return _invoke("git_versions");
+      await _delay(200);
+      return [
+        { version: "2.55.0", tag: "v2.55.0.windows.5" },
+        { version: "2.53.0", tag: "v2.53.0.windows.4" },
+        { version: "2.49.0", tag: "v2.49.0.windows.2" },
+      ];
+    },
+
+    async installGitVersion(version, tag, { onProgress } = {}) {
+      if (IS_TAURI) {
+        let unlisten;
+        try {
+          unlisten = await window.__TAURI__.event.listen("git-install-progress", (e) => {
+            onProgress?.(e.payload?.stage);
+          });
+        } catch (_e) { /* 忽略监听失败 */ }
+        try {
+          return await _invoke("install_git_version", { version, tag });
+        } finally {
+          unlisten?.();
+        }
+      }
+      onProgress?.("downloading");
+      await _delay(400);
+      onProgress?.("extracting");
+      await _delay(300);
+      onProgress?.("done");
+      return "C:\\Users\\dev\\AppData\\Local\\Programs\\Git";
+    },
+
+    async uninstallGit() {
+      if (IS_TAURI) return _invoke("uninstall_git");
+      await _delay(200);
+      return "C:\\Users\\dev\\AppData\\Local\\Programs\\Git";
+    },
+
     async gitOpenInManager(path, select) {
       if (IS_TAURI) return _invoke("git_open_in_manager", { path, select });
       await _delay(100);
