@@ -7,8 +7,8 @@
 //! - 不索要 root、不碰系统包管理器（Git 缺失只给安装命令提示，Q8）
 
 use crate::{
-    ForeignPython, InstalledVersion, NetworkProbe, NodeEnvInfo, PythonEnvInfo, PythonVersionsInfo,
-    VersionsInfo,
+    ForeignPython, InstalledVersion, NetworkProbe, NodeEnvInfo, PkgManagerInfo, ProjectInfo,
+    PythonEnvInfo, PythonProjectInfo, PythonVersionsInfo, VersionsInfo,
 };
 use std::path::{Path, PathBuf};
 
@@ -856,4 +856,589 @@ pub fn dangling_symlinks() -> Vec<String> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// bun：独立单二进制运行时（npmmirror zip，不依赖 node）
+// ---------------------------------------------------------------------------
+
+/// bun 托管安装根：`$XDG_DATA_HOME/devenv/bun/<version>/bun`。
+fn bun_install_root() -> PathBuf {
+    install_root().join("bun")
+}
+
+/// `~/.bun`（或 `$BUN_INSTALL`）—— bun 自身的全局/缓存数据目录。
+fn bun_data_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("BUN_INSTALL") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    home_dir().join(".bun")
+}
+
+/// bun 资产 arch 段：gnu → `bun-linux-x64.zip`；musl → `bun-linux-x64-musl.zip`。
+fn bun_asset_name() -> Result<String, String> {
+    let seg = match arch() {
+        Arch::Amd64 => "x64",
+        Arch::Arm64 => "aarch64",
+        _ => return Err("bun 仅提供 x64 / arm64 Linux 资产".to_string()),
+    };
+    Ok(if libc_kind() == "musl" {
+        format!("bun-linux-{seg}-musl.zip")
+    } else {
+        format!("bun-linux-{seg}.zip")
+    })
+}
+
+/// 从 npmmirror bun 索引解析最高 `bun-v<x.y.z>` 版本（返回纯版本号 x.y.z）。
+fn fetch_latest_bun_version() -> Option<String> {
+    let html = run_cmd(
+        "curl",
+        &["-s", "-m", "15", "https://registry.npmmirror.com/-/binary/bun/"],
+    )?;
+    let re = regex::Regex::new(r"bun-v(\d+)\.(\d+)\.(\d+)/").ok()?;
+    let mut best: Option<(i32, i32, i32)> = None;
+    for cap in re.captures_iter(&html) {
+        let v = (
+            cap[1].parse().unwrap_or(0),
+            cap[2].parse().unwrap_or(0),
+            cap[3].parse().unwrap_or(0),
+        );
+        if best.map(|b| v > b).unwrap_or(true) {
+            best = Some(v);
+        }
+    }
+    best.map(|(a, b, c)| format!("{a}.{b}.{c}"))
+}
+
+/// 组装 bun 资产 URL：`…/-/binary/bun/bun-v<ver>/<asset>`，HEAD 探 200。
+fn bun_asset_url(version: &str) -> Result<String, String> {
+    let name = bun_asset_name()?;
+    let url = format!(
+        "https://registry.npmmirror.com/-/binary/bun/bun-v{version}/{name}"
+    );
+    let code = run_cmd(
+        "curl",
+        &["-s", "-o", "/dev/null", "-w", "%{http_code}", "-I", "-L", "-m", "6", &url],
+    )
+    .ok_or_else(|| format!("探测 bun 资产失败：{url}"))?;
+    if code.trim() == "200" {
+        Ok(url)
+    } else {
+        Err(format!("bun v{version} 未找到 linux 资产（HTTP {code}）"))
+    }
+}
+
+pub fn bun_info() -> PkgManagerInfo {
+    let bin = find_in_path("bun");
+    let bin_path = bin.as_ref().map(|p| p.to_string_lossy().to_string());
+    let mut info = PkgManagerInfo {
+        name: "bun".to_string(),
+        installed: bin.is_some(),
+        version: None,
+        bin_path: bin_path.clone(),
+        data_dir: Some(bun_data_dir().to_string_lossy().to_string()),
+    };
+    if let Some(b) = &bin_path {
+        if let Some(v) = run_cmd(b, &["--version"]) {
+            info.version = Some(v.trim().to_string());
+        }
+    }
+    info
+}
+
+/// 安装/升级 bun。`version` 为 None 时装最新版。zip 扁平单文件 `bun`，
+/// 直接软链 `~/.local/bin/bun → <版本目录>/bun`（不走 link_version_bins，它硬编码 bin/）。
+/// 在版本目录里定位 bun 二进制：zip 可能扁平（`bun`）或带顶层目录（`bun-linux-x64/bun`）。
+fn find_bun_bin(dir: &Path) -> Option<PathBuf> {
+    let direct = dir.join("bun");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let cand = e.path().join("bun");
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+pub fn install_bun(version: Option<&str>, emit: impl Fn(&str)) -> Result<String, String> {
+    let ver = match version {
+        Some(v) => v.trim().trim_start_matches('v').to_string(),
+        None => fetch_latest_bun_version().ok_or("无法解析 bun 最新版本（网络问题）")?,
+    };
+    let root = bun_install_root();
+    let target = root.join(&ver);
+
+    if let Some(existing) = find_bun_bin(&target) {
+        link_bun(&existing)?;
+        return Ok(format!("bun {ver} 已安装，已切换软链"));
+    }
+
+    // unzip 是解压 zip 的前提（GNU tar 读不了 zip）
+    if find_in_path("unzip").is_none() {
+        return Err(format!(
+            "解压 bun 需要 unzip，请先安装：{}",
+            install_hint_for(&["unzip"])
+        ));
+    }
+
+    let url = bun_asset_url(&ver)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建 {} 失败：{e}", root.display()))?;
+    emit("downloading");
+    let archive = root.join(format!("bun-{ver}.zip"));
+    if !curl_download(&url, &archive) {
+        return Err(format!("下载失败（网络或代理问题）：{url}"));
+    }
+    // zip 魔数 PK\x03\x04 校验
+    let head = std::fs::read(&archive).map(|b| b.get(..4).map(|s| s.to_vec()).unwrap_or_default()).unwrap_or_default();
+    if head != b"PK\x03\x04" {
+        let _ = std::fs::remove_file(&archive);
+        return Err("下载内容不是合法 zip（可能是错误页）".to_string());
+    }
+    emit("extracting");
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).map_err(|e| format!("创建 {} 失败：{e}", target.display()))?;
+    let archive_s = archive.to_string_lossy();
+    let target_s = target.to_string_lossy();
+    let ok = crate::new_cmd("unzip")
+        .args(["-o", archive_s.as_ref(), "-d", target_s.as_ref()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&archive);
+    if !ok {
+        return Err("解压失败：unzip 无法读取下载压缩包".to_string());
+    }
+    let bun_bin = find_bun_bin(&target).ok_or("解压后未找到 bun 可执行文件")?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&bun_bin, std::fs::Permissions::from_mode(0o755));
+    link_bun(&bun_bin)?;
+    Ok(format!("bun {ver} 安装完成"))
+}
+
+/// 软链 `~/.local/bin/bun` → 托管 bun 二进制（覆盖旧软链，不碰用户真实文件）。
+fn link_bun(bun_bin: &Path) -> Result<(), String> {
+    let link_dir = local_bin();
+    std::fs::create_dir_all(&link_dir).map_err(|e| format!("创建 {} 失败：{e}", link_dir.display()))?;
+    let dst = link_dir.join("bun");
+    match std::fs::symlink_metadata(&dst) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&dst);
+        }
+        Ok(_) => return Err("~/.local/bin/bun 已存在且不是软链，拒绝覆盖".to_string()),
+        Err(_) => {}
+    }
+    std::os::unix::fs::symlink(bun_bin, &dst)
+        .map_err(|e| format!("创建软链 {} -> {} 失败：{e}", dst.display(), bun_bin.display()))?;
+    ensure_local_bin_in_path();
+    Ok(())
+}
+
+pub fn upgrade_bun() -> Result<String, String> {
+    // 优先用 bun 自带升级；不可用（未装/旧版）则重下最新版覆盖。
+    if find_in_path("bun").is_some() {
+        if let Some(out) = run_cmd("bun", &["upgrade"]) {
+            return Ok(format!("bun 自带升级已执行：{out}"));
+        }
+    }
+    install_bun(None, |_| {})
+}
+
+pub fn uninstall_bun() -> Result<String, String> {
+    let link = local_bin().join("bun");
+    if let Ok(meta) = std::fs::symlink_metadata(&link) {
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&link);
+        }
+    }
+    let root = bun_install_root();
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|e| format!("删除 {} 失败：{e}", root.display()))?;
+    }
+    Ok("已卸载托管 bun（软链与版本目录已清除；~/.bun 数据目录保留，如需可手动删除）".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Python 包管理器：状态探测 + pip --user 安装（落到共享 ~/.local/bin，跨 python 版本不丢）
+// ---------------------------------------------------------------------------
+
+fn python_pkg_data_dir(name: &str) -> PathBuf {
+    match name {
+        "pip" => home_dir().join(".cache").join("pip"),
+        "uv" => data_home().join("uv"),
+        "poetry" => config_home().join("pypoetry"),
+        "pipenv" => data_home().join("virtualenvs"),
+        "conda" => home_dir().join("miniconda3"),
+        _ => data_home().join(name),
+    }
+}
+
+pub fn list_python_pkg_managers() -> Vec<PkgManagerInfo> {
+    let tools: &[(&str, &[&str])] = &[
+        ("pip", &["pip", "pip3"]),
+        ("uv", &["uv"]),
+        ("poetry", &["poetry"]),
+        ("pipenv", &["pipenv"]),
+        ("conda", &["conda"]),
+    ];
+    let mut out = Vec::new();
+    for &(name, candidates) in tools {
+        let bin = which_first(candidates);
+        let bin_path = bin.as_ref().map(|p| p.to_string_lossy().to_string());
+        let mut info = PkgManagerInfo {
+            name: name.to_string(),
+            installed: bin.is_some(),
+            version: None,
+            bin_path: bin_path.clone(),
+            data_dir: Some(python_pkg_data_dir(name).to_string_lossy().to_string()),
+        };
+        if let Some(b) = &bin_path {
+            if let Some(v) = run_cmd(b, &["--version"]) {
+                info.version = Some(v.trim().to_string());
+            }
+        } else if name == "pip" {
+            // pip 常以模块形式存在：python3 -m pip --version
+            if let Some(py) = which_first(&["python3", "python"]) {
+                if let Some(v) = parse_pip_version(
+                    &run_cmd(&py.to_string_lossy(), &["-m", "pip", "--version"]).unwrap_or_default(),
+                ) {
+                    info.installed = true;
+                    info.version = Some(v);
+                    info.bin_path = Some("python3 -m pip".to_string());
+                }
+            }
+        }
+        out.push(info);
+    }
+    out
+}
+
+pub fn install_python_pkg_manager(name: String, version: Option<String>) -> Result<String, String> {
+    let ver = version.unwrap_or_else(|| "latest".to_string());
+    match name.as_str() {
+        "pip" => return Err("pip 随 Python 内置，无需单独安装".to_string()),
+        "conda" => return Err("conda 需安装 Miniconda，暂不支持自动安装".to_string()),
+        _ => {}
+    }
+    let py = which_first(&["python3", "python"])
+        .ok_or_else(|| "未找到 python3/python，无法用 pip 安装".to_string())?;
+    let target = if ver == "latest" {
+        name.clone()
+    } else {
+        format!("{}=={}", name, ver.trim_start_matches('v'))
+    };
+    // --user：装到共享 ~/.local/bin（真实文件），切换/卸载 python 版本后仍在
+    let py_s = py.to_string_lossy().to_string();
+    let out = crate::new_cmd(&py_s)
+        .args(["-m", "pip", "install", "--user", &target])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        ensure_local_bin_in_path();
+        Ok(format!("已安装 {target}（--user → ~/.local/bin）"))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Node 项目：.nvmrc / package.json 解析 → 一键装切
+// ---------------------------------------------------------------------------
+
+/// `.nvmrc` / engines.node 解析为可安装的具体版本（v 前缀）。裸主版本/lts 取可用列表里的最佳匹配。
+fn resolve_node_req(raw: &str, available: &[String]) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(c) = regex::Regex::new(r"^v?(\d+\.\d+\.\d+)$").ok().and_then(|re| re.captures(t)) {
+        return Some(format!("v{}", &c[1]));
+    }
+    if let Some(c) = regex::Regex::new(r"^v?(\d+)$").ok().and_then(|re| re.captures(t)) {
+        let major: i32 = c[1].parse().unwrap_or(0);
+        return available.iter().find(|v| v.starts_with(&format!("v{major}."))).cloned();
+    }
+    if t == "lts" || t.starts_with("lts/") || t == "node" {
+        return available
+            .iter()
+            .find(|v| {
+                v.strip_prefix('v')
+                    .and_then(|s| s.split('.').next())
+                    .and_then(|m| m.parse::<i32>().ok())
+                    .map(|m| m % 2 == 0)
+                    .unwrap_or(false)
+            })
+            .cloned();
+    }
+    // engines 形如 ">=18" / "18.x" / "^20.1.0"：抓第一个数字段
+    if let Some(c) = regex::Regex::new(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?").ok().and_then(|re| re.captures(t)) {
+        if let (Some(maj), Some(min), Some(pat)) = (c.get(1), c.get(2), c.get(3)) {
+            return Some(format!("v{}.{}.{}", maj.as_str(), min.as_str(), pat.as_str()));
+        }
+        if let Some(maj) = c.get(1) {
+            let major: i32 = maj.as_str().parse().unwrap_or(0);
+            return available.iter().find(|v| v.starts_with(&format!("v{major}."))).cloned();
+        }
+    }
+    None
+}
+
+pub fn inspect_node_project(path: String) -> Result<ProjectInfo, String> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err("路径不是有效目录".to_string());
+    }
+    let versions = list_versions();
+    let mut info = ProjectInfo {
+        path: path.clone(),
+        node_requirement: None,
+        requirement_source: None,
+        package_manager: None,
+        registry: None,
+        has_nvmrc: false,
+        has_package_json: false,
+        has_npmrc: false,
+        current_node: versions.current.clone(),
+        node_installed: false,
+    };
+
+    let nvmrc = p.join(".nvmrc");
+    if nvmrc.exists() {
+        info.has_nvmrc = true;
+        if let Ok(c) = std::fs::read_to_string(&nvmrc) {
+            info.node_requirement = resolve_node_req(&c, &versions.available);
+            info.requirement_source = Some(".nvmrc".to_string());
+        }
+    }
+
+    let pkg = p.join("package.json");
+    if pkg.exists() {
+        info.has_package_json = true;
+        if let Ok(c) = std::fs::read_to_string(&pkg) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&c) {
+                if info.node_requirement.is_none() {
+                    if let Some(eng) = json.get("engines").and_then(|e| e.get("node")).and_then(|n| n.as_str()) {
+                        info.node_requirement = resolve_node_req(eng, &versions.available);
+                        if info.node_requirement.is_some() {
+                            info.requirement_source = Some("package.json engines".to_string());
+                        }
+                    }
+                }
+                if let Some(pm) = json.get("packageManager").and_then(|m| m.as_str()) {
+                    info.package_manager = Some(pm.to_string());
+                }
+            }
+        }
+    }
+
+    let npmrc = p.join(".npmrc");
+    if npmrc.exists() {
+        info.has_npmrc = true;
+        if let Ok(c) = std::fs::read_to_string(&npmrc) {
+            for line in c.lines() {
+                if let Some(v) = line.trim().strip_prefix("registry=") {
+                    info.registry = Some(v.trim().to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(req) = &info.node_requirement {
+        let vnum = req.trim_start_matches('v');
+        info.node_installed = node_install_root().join(format!("v{vnum}")).join("bin").join("node").exists();
+    }
+    Ok(info)
+}
+
+pub fn apply_node_project(path: String) -> Result<String, String> {
+    let info = inspect_node_project(path)?;
+    let mut msgs = Vec::new();
+    if let Some(req) = &info.node_requirement {
+        if !info.node_installed {
+            install_node(req, |_| {})?;
+            msgs.push(format!("已安装 Node {req}"));
+        }
+        switch_node(req.clone())?;
+        msgs.push(format!("Node 已切换到 {req}"));
+    } else {
+        msgs.push("未检测到项目 Node 版本要求（.nvmrc / engines）".to_string());
+    }
+    // corepack 仅在存在时尝试（缺失则跳过，不强制安装）
+    if let Some(pm) = &info.package_manager {
+        if find_in_path("corepack").is_some() {
+            let _ = run_cmd("corepack", &["use", pm]);
+            msgs.push(format!("corepack 已激活 {pm}"));
+        } else {
+            msgs.push(format!("检测到 packageManager={pm}，但未安装 corepack，已跳过"));
+        }
+    }
+    Ok(msgs.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Python 项目：.python-version / pyproject.toml / runtime.txt / Pipfile → 一键装切
+// ---------------------------------------------------------------------------
+
+fn parse_py_ver_tuple(s: &str) -> Option<(i32, i32, i32)> {
+    let t = s.trim().strip_prefix('v').unwrap_or(s.trim());
+    let mut it = t.split('.');
+    Some((
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next().and_then(|p| p.parse().ok()).unwrap_or(0),
+    ))
+}
+
+/// 把要求解析为具体 3 段版本。裸 minor（3.11）/requires-python 取已安装可用列表里该 minor 最新补丁。
+fn resolve_python_req(raw: &str, available: &[String]) -> Option<String> {
+    let t = raw.trim();
+    if let Some(v) = parse_py_ver_tuple(t) {
+        if v.2 != 0 {
+            return Some(format!("{}.{}.{}", v.0, v.1, v.2));
+        }
+        // x.y.0 / x.y → 取该 minor 最新补丁
+        return available
+            .iter()
+            .find(|s| s.starts_with(&format!("{}.{}.", v.0, v.1)))
+            .cloned()
+            .or_else(|| Some(format!("{}.{}", v.0, v.1)));
+    }
+    if t == "3" || t == "3.x" {
+        return available.first().cloned();
+    }
+    // requires-python：">=3.11" / "^3.11" / ">=3.11,<4"
+    if let Some(c) = regex::Regex::new(r"(\d+)\.(\d+)(?:\.(\d+))?").ok().and_then(|re| re.captures(t)) {
+        let maj: i32 = c[1].parse().unwrap_or(3);
+        let min: i32 = c[2].parse().unwrap_or(0);
+        if let Some(pat) = c.get(3) {
+            return Some(format!("{maj}.{min}.{}", pat.as_str()));
+        }
+        return available
+            .iter()
+            .find(|s| s.starts_with(&format!("{maj}.{min}.")))
+            .cloned();
+    }
+    None
+}
+
+pub fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err("路径不是有效目录".to_string());
+    }
+    let versions = list_python_versions();
+    let mut info = PythonProjectInfo {
+        path: path.clone(),
+        python_requirement: None,
+        requirement_source: None,
+        pkg_tool: None,
+        index: None,
+        has_python_version_file: false,
+        has_pyproject_toml: false,
+        has_runtime_txt: false,
+        has_pipfile: false,
+        current_python: versions.current.clone(),
+        python_installed: false,
+    };
+
+    let pv = p.join(".python-version");
+    if pv.exists() {
+        info.has_python_version_file = true;
+        if let Ok(c) = std::fs::read_to_string(&pv) {
+            info.python_requirement = resolve_python_req(&c, &versions.available);
+            if info.python_requirement.is_some() {
+                info.requirement_source = Some(".python-version".to_string());
+            }
+        }
+    }
+
+    let pyproj = p.join("pyproject.toml");
+    if pyproj.exists() {
+        info.has_pyproject_toml = true;
+        if let Ok(c) = std::fs::read_to_string(&pyproj) {
+            if info.python_requirement.is_none() {
+                if let Some(cap) = regex::Regex::new(r#"(?m)^requires-python\s*=\s*"([^"]+)""#)
+                    .ok()
+                    .and_then(|re| re.captures(&c))
+                {
+                    info.python_requirement = resolve_python_req(&cap[1], &versions.available);
+                    if info.python_requirement.is_some() {
+                        info.requirement_source = Some("pyproject.toml requires-python".to_string());
+                    }
+                }
+            }
+            for tool in ["uv", "poetry", "pipenv", "hatchling", "setuptools"] {
+                if c.contains(&format!("[tool.{tool}]")) {
+                    info.pkg_tool = Some(tool.to_string());
+                    break;
+                }
+            }
+            if let Some(cap) = regex::Regex::new(r#"(?m)^index\s*=\s*"([^"]+)""#)
+                .ok()
+                .and_then(|re| re.captures(&c))
+            {
+                info.index = Some(cap[1].to_string());
+            }
+        }
+    }
+
+    let rt = p.join("runtime.txt");
+    if rt.exists() {
+        info.has_runtime_txt = true;
+        if info.python_requirement.is_none() {
+            if let Ok(c) = std::fs::read_to_string(&rt) {
+                let t = c.trim().strip_prefix("python-").unwrap_or(c.trim());
+                info.python_requirement = resolve_python_req(t, &versions.available);
+                if info.python_requirement.is_some() {
+                    info.requirement_source = Some("runtime.txt".to_string());
+                }
+            }
+        }
+    }
+
+    let pf = p.join("Pipfile");
+    if pf.exists() {
+        info.has_pipfile = true;
+        if info.python_requirement.is_none() {
+            if let Ok(c) = std::fs::read_to_string(&pf) {
+                if let Some(cap) = regex::Regex::new(r#"(?m)^python_version\s*=\s*"([^"]+)""#)
+                    .ok()
+                    .and_then(|re| re.captures(&c))
+                {
+                    info.python_requirement = resolve_python_req(&cap[1], &versions.available);
+                    if info.python_requirement.is_some() {
+                        info.requirement_source = Some("Pipfile".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(req) = &info.python_requirement {
+        info.python_installed = python_install_root().join(req).join("bin").join("python3").exists();
+    }
+    Ok(info)
+}
+
+pub fn apply_python_project(path: String) -> Result<String, String> {
+    let info = inspect_python_project(path)?;
+    let mut msgs = Vec::new();
+    if let Some(req) = &info.python_requirement {
+        if !info.python_installed {
+            install_python(req, |_| {})?;
+            msgs.push(format!("已安装 Python {req}"));
+        }
+        switch_python(req.clone())?;
+        msgs.push(format!("Python 已切换到 {req}"));
+    } else {
+        msgs.push("未检测到项目 Python 版本要求（.python-version / pyproject.toml / runtime.txt / Pipfile）".to_string());
+    }
+    Ok(msgs.join("\n"))
 }

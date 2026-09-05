@@ -13,7 +13,7 @@
 
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── 交互式输入（数字选择菜单）──────────────────────────────────────
 
@@ -129,6 +129,44 @@ enum NodeCmd {
     Switch { version: Option<String> },
     /// 卸载版本（参数可填版本号或已装列表序号；省略则数字选择）
     Uninstall { version: Option<String> },
+    /// 项目管理：解析 .nvmrc / package.json 并一键装切 Node（参数为项目目录，默认当前目录）
+    Project { path: Option<String> },
+    /// npm 镜像测速（参数为 registry URL，省略则测当前/常用源）
+    Test { url: Option<String> },
+    /// bun 运行时：状态 / 安装 / 升级 / 卸载（省略动作进入数字菜单）
+    Bun {
+        #[command(subcommand)]
+        action: Option<BunAction>,
+    },
+    /// npm 发布账号：扫描 ~/.npmrc 已有凭据并纳入管理 / 切换
+    Accounts,
+    /// 发布 npm 包：扫描 packages/ → dry-run 预检 → 确认后真发
+    Publish {
+        /// 项目根目录（默认当前目录）
+        #[arg(long)]
+        dir: Option<String>,
+        /// 发布源 registry（默认 https://registry.npmjs.org）
+        #[arg(long)]
+        registry: Option<String>,
+        /// 发布前执行 npm run build
+        #[arg(long)]
+        build: bool,
+        /// 跳过 y/N 确认（脚本用；仍会先 dry-run）
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum BunAction {
+    /// 查看 bun 安装状态
+    Status,
+    /// 安装 / 升级 bun（参数可填版本号，省略装最新）
+    Install { version: Option<String> },
+    /// 升级 bun 到最新
+    Upgrade,
+    /// 卸载托管 bun
+    Uninstall,
 }
 
 #[derive(Subcommand, Clone)]
@@ -145,6 +183,27 @@ enum PythonCmd {
     Switch { version: Option<String> },
     /// 卸载版本（参数可填版本号或已装列表序号；省略则数字选择）
     Uninstall { version: Option<String> },
+    /// 项目管理：解析 .python-version / pyproject.toml 等并一键装切 Python（参数为项目目录）
+    Project { path: Option<String> },
+    /// pip 镜像测速（参数为 index URL，省略则测当前/常用源）
+    Test { url: Option<String> },
+    /// Python 包管理器：列出 / 安装 pip·uv·poetry·pipenv（装到共享 ~/.local/bin）
+    Pkg {
+        #[command(subcommand)]
+        action: Option<PyPkgAction>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum PyPkgAction {
+    /// 列出 pip / uv / poetry / pipenv / conda 状态
+    List,
+    /// 安装包管理器（参数为名称，省略数字选择；--version 指定版本）
+    Install {
+        name: Option<String>,
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -247,7 +306,7 @@ fn main() {
 /// 一个动作菜单项：键（英文子命令）+ 中文说明；执行时按需向用户收集参数。
 type MenuItem = (&'static str, &'static str);
 
-fn node_action_menu() -> [MenuItem; 7] {
+fn node_action_menu() -> [MenuItem; 12] {
     [
         ("status", "环境体检"),
         ("versions", "查看已装 / 可用版本"),
@@ -255,11 +314,16 @@ fn node_action_menu() -> [MenuItem; 7] {
         ("switch", "切换版本（数字选择）"),
         ("uninstall", "卸载版本（数字选择）"),
         ("registry", "查看 / 设置 npm 镜像源"),
+        ("project", "项目管理（.nvmrc / package.json 一键装切）"),
+        ("test", "npm 镜像测速"),
+        ("bun", "bun 运行时（状态 / 安装 / 升级 / 卸载）"),
+        ("accounts", "npm 发布账号（扫描 ~/.npmrc 凭据）"),
+        ("publish", "发布 npm 包（dry-run 预检后确认）"),
         ("back", "返回上一级"),
     ]
 }
 
-fn python_action_menu() -> [MenuItem; 7] {
+fn python_action_menu() -> [MenuItem; 10] {
     [
         ("status", "环境体检"),
         ("versions", "查看已装 / 可用版本"),
@@ -267,6 +331,9 @@ fn python_action_menu() -> [MenuItem; 7] {
         ("switch", "切换版本（数字选择）"),
         ("uninstall", "卸载版本（数字选择）"),
         ("registry", "查看 / 设置 pip 镜像源"),
+        ("project", "项目管理（.python-version / pyproject 一键装切）"),
+        ("test", "pip 镜像测速"),
+        ("pkg", "Python 包管理器（uv / poetry / pipenv）"),
         ("back", "返回上一级"),
     ]
 }
@@ -316,6 +383,11 @@ fn pick_node_action() -> NodeCmd {
             "switch" => NodeCmd::Switch { version: None },
             "uninstall" => NodeCmd::Uninstall { version: None },
             "registry" => NodeCmd::Registry { set: ask_registry_url() },
+            "project" => NodeCmd::Project { path: None },
+            "test" => NodeCmd::Test { url: None },
+            "bun" => NodeCmd::Bun { action: None },
+            "accounts" => NodeCmd::Accounts,
+            "publish" => NodeCmd::Publish { dir: None, registry: None, build: false, yes: false },
             _ => return,
         };
         run_node(chosen.clone());
@@ -333,6 +405,9 @@ fn pick_python_action() -> PythonCmd {
             "switch" => PythonCmd::Switch { version: None },
             "uninstall" => PythonCmd::Uninstall { version: None },
             "registry" => PythonCmd::Registry { set: ask_registry_url() },
+            "project" => PythonCmd::Project { path: None },
+            "test" => PythonCmd::Test { url: None },
+            "pkg" => PythonCmd::Pkg { action: None },
             _ => return,
         };
         run_python(chosen.clone());
@@ -526,6 +601,357 @@ fn run_node(cmd: NodeCmd) {
                 Err(e) => fail(e),
             }
         }
+        NodeCmd::Project { path } => run_node_project(path),
+        NodeCmd::Test { url } => run_node_test(url),
+        NodeCmd::Bun { action } => run_bun(action),
+        NodeCmd::Accounts => run_npm_accounts(),
+        NodeCmd::Publish { dir, registry, build, yes } => run_npm_publish(dir, registry, build, yes),
+    }
+}
+
+// ── Node：项目 / 测速 / bun / 发布账号 / 发布 ─────────────────────
+
+/// 询问项目目录（默认当前目录）。
+fn ask_project_dir() -> String {
+    match prompt_line("项目目录（直接回车 = 当前目录）: ") {
+        Some(s) if !s.is_empty() => s,
+        _ => ".".to_string(),
+    }
+}
+
+fn run_node_project(path: Option<String>) {
+    let dir = path.unwrap_or_else(ask_project_dir);
+    let info = match devenv_core::api::inspect_project(dir.clone()) {
+        Ok(i) => i,
+        Err(e) => fail(format!("解析项目失败: {}", e)),
+    };
+    println!("项目: {}", info.path);
+    println!("  .nvmrc      : {}", if info.has_nvmrc { "有" } else { "无" });
+    println!("  package.json: {}", if info.has_package_json { "有" } else { "无" });
+    println!("  .npmrc      : {}", if info.has_npmrc { "有" } else { "无" });
+    match (&info.node_requirement, &info.requirement_source) {
+        (Some(req), Some(src)) => println!("  要求 Node   : {}（来自 {}）", req, src),
+        (Some(req), None) => println!("  要求 Node   : {}", req),
+        _ => println!("  要求 Node   : 未声明"),
+    }
+    if let Some(pm) = &info.package_manager {
+        println!("  包管理器    : {}", pm);
+    }
+    if let Some(r) = &info.registry {
+        println!("  项目 registry: {}", r);
+    }
+    println!("  当前 Node   : {}", info.current_node.as_deref().unwrap_or("未安装/未切换"));
+    if info.node_requirement.is_some() {
+        println!("  要求版本已装: {}", if info.node_installed { "是 ✓" } else { "否（需安装）" });
+        if !prompt_yes("是否应用（安装/切换到要求版本）？", true) {
+            println!("已取消");
+            return;
+        }
+        match devenv_core::api::apply_project(dir) {
+            Ok(msg) => println!("✓ {}", msg.replace('\n', "\n  ")),
+            Err(e) => fail(format!("应用失败: {}", e)),
+        }
+    }
+}
+
+fn run_node_test(url: Option<String>) {
+    // 无 URL：测当前 registry + 常用源
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(u) = url {
+        targets.push(u);
+    } else {
+        if let Ok(Some(cur)) = devenv_core::api::read_registry() {
+            targets.push(cur);
+        }
+        for u in ["https://registry.npmmirror.com", "https://registry.npmjs.org"] {
+            if !targets.iter().any(|t| t == u) {
+                targets.push(u.to_string());
+            }
+        }
+    }
+    for u in targets {
+        let r = devenv_core::api::test_registry(u.clone());
+        if r.reachable {
+            println!(
+                "  [✓] {:<40} HTTP {} · {}ms{}",
+                u,
+                r.status.unwrap_or(0),
+                r.latency_ms.unwrap_or(0),
+                if r.needs_auth { " · 需认证" } else { "" }
+            );
+        } else {
+            println!(
+                "  [✗] {:<40} {} ({})",
+                u,
+                r.error.as_deref().unwrap_or("不可达"),
+                if r.cert_issue { "证书不受信任" } else { "" }
+            );
+        }
+    }
+}
+
+fn bun_menu() -> [MenuItem; 5] {
+    [
+        ("status", "查看 bun 状态"),
+        ("install", "安装 / 升级 bun（可指定版本）"),
+        ("upgrade", "升级 bun 到最新"),
+        ("uninstall", "卸载托管 bun"),
+        ("back", "返回上一级"),
+    ]
+}
+
+fn run_bun(action: Option<BunAction>) {
+    match action {
+        Some(a) => run_bun_action(a),
+        None => menu_loop("bun 运行时", &bun_menu(), |key| {
+            let a = match key {
+                "status" => BunAction::Status,
+                "install" => BunAction::Install { version: None },
+                "upgrade" => BunAction::Upgrade,
+                "uninstall" => BunAction::Uninstall,
+                _ => return,
+            };
+            run_bun_action(a);
+        }),
+    }
+}
+
+fn run_bun_action(action: BunAction) {
+    use devenv_core::api;
+    match action {
+        BunAction::Status => {
+            let info = api::bun_info();
+            println!("bun 状态:");
+            println!("  安装: {}", if info.installed { "已安装 ✓" } else { "未安装 ✗" });
+            println!("  版本: {}", info.version.as_deref().unwrap_or("-"));
+            println!("  路径: {}", info.bin_path.as_deref().unwrap_or("-"));
+            println!("  数据目录: {}", info.data_dir.as_deref().unwrap_or("-"));
+        }
+        BunAction::Install { version } => {
+            let version = match version {
+                Some(v) => Some(v),
+                None => match prompt_line("bun 版本（直接回车 = 最新）: ") {
+                    Some(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                },
+            };
+            println!("安装 bun {} ...", version.as_deref().unwrap_or("latest"));
+            match api::install_bun(version, |stage| println!("  [{}]", stage)) {
+                Ok(msg) => println!("✓ {}", msg),
+                Err(e) => fail(format!("安装失败: {}", e)),
+            }
+        }
+        BunAction::Upgrade => match api::upgrade_bun() {
+            Ok(msg) => println!("✓ {}", msg),
+            Err(e) => fail(format!("升级失败: {}", e)),
+        },
+        BunAction::Uninstall => {
+            if !prompt_yes("确认卸载托管 bun？", false) {
+                println!("已取消");
+                return;
+            }
+            match api::uninstall_bun() {
+                Ok(msg) => println!("✓ {}", msg),
+                Err(e) => fail(format!("卸载失败: {}", e)),
+            }
+        }
+    }
+}
+
+/// npm 发布账号：扫描 ~/.npmrc 已有凭据，纳入管理 / 切换激活。
+fn run_npm_accounts() {
+    use devenv_core::api;
+    let managed = api::list_accounts();
+    println!("已管理账号（{} 个，激活: {}）:",
+        managed.accounts.len(),
+        managed.active.as_deref().unwrap_or("无"));
+    for a in &managed.accounts {
+        let act = if managed.active.as_deref() == Some(a.id.as_str()) { "  <- 激活" } else { "" };
+        println!("  [{}] {}  ({}){}", a.id, a.name, a.registry, act);
+    }
+
+    let creds = api::scan_npmrc_credentials();
+    if creds.is_empty() {
+        println!("\n~/.npmrc 未发现外部凭据。");
+        println!("请先在终端执行 `npm login --registry=<源>`，或手动编辑 ~/.npmrc 写入 _authToken。");
+        return;
+    }
+    println!("\n~/.npmrc 中的外部凭据（{} 个，未纳入管理）:", creds.len());
+    for (i, c) in creds.iter().enumerate() {
+        println!(
+            "  [{}] {}  [{}] {}{}",
+            i + 1,
+            c.registry,
+            c.auth_type,
+            if c.reachable { "可达 ✓" } else { "不可达/未验证" },
+            c.username.as_deref().map(|u| format!(" user={u}")).unwrap_or_default()
+        );
+    }
+    match prompt_line("\n输入序号纳入管理（q 取消）: ") {
+        Some(raw) if !raw.is_empty() && !raw.eq_ignore_ascii_case("q") => {
+            if let Ok(n) = raw.parse::<usize>() {
+                if n >= 1 && n <= creds.len() {
+                    let reg = creds[n - 1].registry.clone();
+                    match api::import_npmrc_credential(reg.clone()) {
+                        Ok(f) => {
+                            println!("✓ 已纳入管理: {}（共 {} 个账号）", reg, f.accounts.len());
+                            // 若只有这一个账号，提示可切换
+                            if let Some(a) = f.accounts.last() {
+                                if prompt_yes(&format!("切换激活到该账号（{}）？", a.name), true) {
+                                    match api::switch_account(a.id.clone()) {
+                                        Ok(_) => println!("✓ 已切换激活（_authToken 写入 ~/.npmrc 全局）"),
+                                        Err(e) => eprintln!("切换失败: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => fail(format!("纳入管理失败: {}", e)),
+                    }
+                    return;
+                }
+            }
+            eprintln!("无效序号: {}", raw);
+        }
+        _ => println!("已取消"),
+    }
+}
+
+/// 读取根目录单包（package.json 直接在 dir 下）。共享扫描器只看 packages/ 子目录，
+/// CLI 这里补上单包场景。
+fn read_root_package(root: &str) -> Option<devenv_core::PublishPackage> {
+    let pj = Path::new(root).join("package.json");
+    let content = std::fs::read_to_string(&pj).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let name = v["name"].as_str()?.to_string();
+    let version = v["version"].as_str()?.to_string();
+    if name.is_empty() || version.is_empty() {
+        return None;
+    }
+    let dir = Path::new(root).canonicalize().unwrap_or_else(|_| PathBuf::from(root));
+    Some(devenv_core::PublishPackage {
+        name,
+        version,
+        dir: dir.to_string_lossy().to_string(),
+        has_dist: dir.join("dist").is_dir(),
+        is_private: v["private"].as_bool().unwrap_or(false),
+    })
+}
+
+/// 发布 npm 包：扫描 → dry-run → 确认 → 真发。
+fn run_npm_publish(dir: Option<String>, registry: Option<String>, build: bool, yes: bool) {
+    use devenv_core::api;
+    let root = dir.unwrap_or_else(|| ".".to_string());
+    let mut pkgs = match api::list_publish_packages(root.clone()) {
+        Ok(p) => p,
+        Err(e) => fail(format!("扫描包失败: {}", e)),
+    };
+    // CLI 额外支持单包（根目录 package.json）；共享扫描器只看 monorepo 的 packages/ 子目录。
+    if let Some(root_pkg) = read_root_package(&root) {
+        if !pkgs.iter().any(|p| p.dir == root_pkg.dir) {
+            pkgs.insert(0, root_pkg);
+        }
+    }
+    if pkgs.is_empty() {
+        fail("未找到可发布的包（需要含 name/version 的 package.json，或 packages/* 子目录）".to_string());
+    }
+    println!("发现 {} 个包:", pkgs.len());
+    for (i, p) in pkgs.iter().enumerate() {
+        println!(
+            "  [{}] {}@{}  {}{}",
+            i + 1,
+            p.name,
+            p.version,
+            if p.is_private { "[private] " } else { "" },
+            if p.has_dist { "有 dist" } else { "无 dist" }
+        );
+    }
+    // 选择要发布的包（默认全部非 private）
+    let chosen: Vec<String> = match prompt_line("输入要发布的序号（逗号分隔，直接回车 = 全部非 private）: ") {
+        Some(s) if !s.is_empty() => s
+            .split([',', ' '])
+            .filter_map(|t| t.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 1 && *n <= pkgs.len())
+            .map(|n| pkgs[n - 1].dir.clone())
+            .collect(),
+        _ => pkgs.iter().filter(|p| !p.is_private).map(|p| p.dir.clone()).collect(),
+    };
+    if chosen.is_empty() {
+        fail("没有选中任何可发布的包（private 包需显式选序号）".to_string());
+    }
+
+    let reg = registry.unwrap_or_else(|| {
+        match prompt_line("发布源 registry（直接回车 = https://registry.npmjs.org）: ") {
+            Some(s) if !s.is_empty() => s,
+            _ => "https://registry.npmjs.org".to_string(),
+        }
+    });
+    let build = build || prompt_yes("发布前执行 npm run build？", false);
+
+    // 1) dry-run 预检
+    println!("\n— 先执行 dry-run 预检 —");
+    match api::publish_packages(chosen.clone(), reg.clone(), build, None, Some(true)) {
+        Ok(results) => {
+            let mut all_ok = true;
+            for r in &results {
+                let mark = if r.ok { "✓" } else { "✗" };
+                for (i, line) in r.message.lines().enumerate() {
+                    if i == 0 {
+                        println!("  {} {}: {}", mark, r.name, line);
+                    } else {
+                        println!("      {}", line);
+                    }
+                }
+                if !r.ok {
+                    all_ok = false;
+                }
+            }
+            if !all_ok {
+                fail("dry-run 存在失败项，已中止（未真实发布）".to_string());
+            }
+        }
+        Err(e) => fail(format!("dry-run 失败: {}", e)),
+    }
+
+    // 2) 确认后真发
+    if !yes && !prompt_yes(&format!("\n确认真实发布 {} 个包到 {}？此操作不可逆！", chosen.len(), reg), false) {
+        println!("已取消（未发布）");
+        return;
+    }
+    publish_for_real(chosen, reg, build, None);
+}
+
+/// 真实发布；遇 needs_otp 提示输入 OTP 后重试。
+fn publish_for_real(packages: Vec<String>, reg: String, build: bool, otp: Option<String>) {
+    use devenv_core::api;
+    match api::publish_packages(packages.clone(), reg.clone(), build, otp.clone(), Some(false)) {
+        Ok(results) => {
+            let mut need_otp: Vec<String> = Vec::new();
+            for r in &results {
+                let mark = if r.ok { "✓" } else { "✗" };
+                for (i, line) in r.message.lines().enumerate() {
+                    if i == 0 {
+                        println!("  {} {}: {}", mark, r.name, line);
+                    } else {
+                        println!("      {}", line);
+                    }
+                }
+                if r.needs_otp {
+                    need_otp.push(r.name.clone());
+                }
+                if let Some(h) = &r.hint {
+                    println!("      提示: {} ({})", h.text, h.url);
+                }
+            }
+            if !need_otp.is_empty() && otp.is_none() {
+                match prompt_line("检测到 2FA，输入 OTP 验证码（q 取消）: ") {
+                    Some(code) if !code.is_empty() && !code.eq_ignore_ascii_case("q") => {
+                        publish_for_real(packages, reg, build, Some(code));
+                    }
+                    _ => println!("已取消（未发布需 OTP 的包）"),
+                }
+            }
+        }
+        Err(e) => fail(format!("发布失败: {}", e)),
     }
 }
 
@@ -687,6 +1113,143 @@ fn run_python(cmd: PythonCmd) {
             match devenv_core::api::uninstall_python_version(version.clone()) {
                 Ok(dir) => println!("✓ 已卸载 {}（{}）", version, dir),
                 Err(e) => fail(e),
+            }
+        }
+        PythonCmd::Project { path } => run_python_project(path),
+        PythonCmd::Test { url } => run_python_test(url),
+        PythonCmd::Pkg { action } => run_py_pkg(action),
+    }
+}
+
+// ── Python：项目 / 测速 / 包管理器 ───────────────────────────────
+
+fn run_python_project(path: Option<String>) {
+    let dir = path.unwrap_or_else(ask_project_dir);
+    let info = match devenv_core::api::inspect_python_project(dir.clone()) {
+        Ok(i) => i,
+        Err(e) => fail(format!("解析项目失败: {}", e)),
+    };
+    println!("项目: {}", info.path);
+    println!("  .python-version: {}", if info.has_python_version_file { "有" } else { "无" });
+    println!("  pyproject.toml : {}", if info.has_pyproject_toml { "有" } else { "无" });
+    println!("  runtime.txt    : {}", if info.has_runtime_txt { "有" } else { "无" });
+    println!("  Pipfile        : {}", if info.has_pipfile { "有" } else { "无" });
+    match (&info.python_requirement, &info.requirement_source) {
+        (Some(req), Some(src)) => println!("  要求 Python    : {}（来自 {}）", req, src),
+        (Some(req), None) => println!("  要求 Python    : {}", req),
+        _ => println!("  要求 Python    : 未声明"),
+    }
+    if let Some(t) = &info.pkg_tool {
+        println!("  打包工具       : {}", t);
+    }
+    if let Some(i) = &info.index {
+        println!("  项目 index     : {}", i);
+    }
+    println!("  当前 Python    : {}", info.current_python.as_deref().unwrap_or("未安装/未切换"));
+    if info.python_requirement.is_some() {
+        println!("  要求版本已装   : {}", if info.python_installed { "是 ✓" } else { "否（需安装）" });
+        if !prompt_yes("是否应用（安装/切换到要求版本）？", true) {
+            println!("已取消");
+            return;
+        }
+        match devenv_core::api::apply_python_project(dir) {
+            Ok(msg) => println!("✓ {}", msg.replace('\n', "\n  ")),
+            Err(e) => fail(format!("应用失败: {}", e)),
+        }
+    }
+}
+
+fn run_python_test(url: Option<String>) {
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(u) = url {
+        targets.push(u);
+    } else {
+        if let Ok(Some(cur)) = devenv_core::api::read_pip_index() {
+            targets.push(cur);
+        }
+        for u in ["https://pypi.tuna.tsinghua.edu.cn/simple", "https://pypi.org/simple"] {
+            if !targets.iter().any(|t| t == u) {
+                targets.push(u.to_string());
+            }
+        }
+    }
+    for u in targets {
+        let r = devenv_core::api::test_pypi(u.clone());
+        if r.reachable {
+            println!(
+                "  [✓] {:<45} HTTP {} · {}ms",
+                u,
+                r.status.unwrap_or(0),
+                r.latency_ms.unwrap_or(0)
+            );
+        } else {
+            println!("  [✗] {:<45} {}", u, r.error.as_deref().unwrap_or("不可达"));
+        }
+    }
+}
+
+fn py_pkg_menu() -> [MenuItem; 3] {
+    [
+        ("list", "查看包管理器状态"),
+        ("install", "安装 uv / poetry / pipenv（到共享 ~/.local/bin）"),
+        ("back", "返回上一级"),
+    ]
+}
+
+fn run_py_pkg(action: Option<PyPkgAction>) {
+    match action {
+        Some(a) => run_py_pkg_action(a),
+        None => menu_loop("Python 包管理器", &py_pkg_menu(), |key| {
+            let a = match key {
+                "list" => PyPkgAction::List,
+                "install" => PyPkgAction::Install { name: None, version: None },
+                _ => return,
+            };
+            run_py_pkg_action(a);
+        }),
+    }
+}
+
+fn run_py_pkg_action(action: PyPkgAction) {
+    use devenv_core::api;
+    match action {
+        PyPkgAction::List => {
+            let tools = api::list_python_pkg_managers();
+            println!("Python 包管理器:");
+            for t in &tools {
+                println!(
+                    "  [{}] {:<7} {:<10} {}",
+                    if t.installed { "✓" } else { "✗" },
+                    t.name,
+                    t.version.as_deref().unwrap_or("-"),
+                    t.bin_path.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        PyPkgAction::Install { name, version } => {
+            // 可装：uv / poetry / pipenv（pip 内置、conda 需 Miniconda，后端会拒绝）
+            let installable = ["uv", "poetry", "pipenv"];
+            let name = match name {
+                Some(n) => n,
+                None => {
+                    println!("可安装的包管理器:");
+                    match pick("选择要安装的工具", &installable, |n| n.to_string()) {
+                        Some(n) => n.to_string(),
+                        None => fail("已取消".to_string()),
+                    }
+                }
+            };
+            let version = match version {
+                Some(v) => Some(v),
+                None => match prompt_line("版本（直接回车 = 最新）: ") {
+                    Some(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                },
+            };
+            println!("安装 {} {} ...", name, version.as_deref().unwrap_or("latest"));
+            match api::install_python_pkg_manager(name.clone(), version) {
+                Ok(msg) => println!("✓ {}", msg),
+                Err(e) => fail(format!("安装失败: {}", e)),
             }
         }
     }

@@ -154,6 +154,48 @@ pub(crate) fn new_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
     cmd
 }
 
+/// npm 可执行名：Windows 是 `npm.cmd`，Linux/macOS 是 `npm`。
+fn npm_bin() -> &'static str {
+    #[cfg(windows)]
+    {
+        "npm.cmd"
+    }
+    #[cfg(not(windows))]
+    {
+        "npm"
+    }
+}
+
+/// curl 可执行名：Windows 调用 `curl.exe`，Linux/macOS 为 `curl`。
+fn curl_bin() -> &'static str {
+    #[cfg(windows)]
+    {
+        "curl.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "curl"
+    }
+}
+
+/// 空设备路径（curl `-o` 丢弃响应体用）。
+fn null_dev() -> &'static str {
+    #[cfg(windows)]
+    {
+        "NUL"
+    }
+    #[cfg(not(windows))]
+    {
+        "/dev/null"
+    }
+}
+
+/// 是否传 schannel 专有的 `--ssl-no-revoke`（仅 Windows curl/schannel 有效，非 Windows curl 会报未知参数）。
+#[cfg(windows)]
+const CURL_SCHANNEL_NO_REVOKE: bool = true;
+#[cfg(not(windows))]
+const CURL_SCHANNEL_NO_REVOKE: bool = false;
+
 fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
     let out = new_cmd(program).args(args).output().ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -289,17 +331,22 @@ struct CurlProbe {
 fn probe_curl(endpoint: &str, auth_args: &[&str]) -> CurlProbe {
     let mut args: Vec<String> = vec![
         "-sS".into(), // 静默进度，但保留错误输出到 stderr（证书/连接错误需靠它判定）
-        // schannel 默认做证书吊销检查（CRL/OCSP）；内网私有源吊销服务器不可达时
-        // 会报 CRYPT_E_NO_REVOCATION_CHECK 误判为不可达。跳过吊销检查（仍验证证书链）。
-        "--ssl-no-revoke".into(),
+    ];
+    // schannel 默认做证书吊销检查（CRL/OCSP）；内网私有源吊销服务器不可达时
+    // 会报 CRYPT_E_NO_REVOCATION_CHECK 误判为不可达。跳过吊销检查（仍验证证书链）。
+    // 该参数为 Windows schannel 专有，非 Windows curl 不识别，仅 Windows 传。
+    if CURL_SCHANNEL_NO_REVOKE {
+        args.push("--ssl-no-revoke".into());
+    }
+    args.extend([
         "-o".into(),
-        "NUL".into(),
+        null_dev().into(),
         "-w".into(),
         "%{http_code} %{time_total} %{size_download}".into(),
         "-L".into(),
         "-m".into(),
         "10".into(),
-    ];
+    ]);
     if let Some((host, port)) = url_host_port(endpoint) {
         if let Some(pem) = host_pem_path(&host, port) {
             args.push("--cacert".into());
@@ -309,7 +356,7 @@ fn probe_curl(endpoint: &str, auth_args: &[&str]) -> CurlProbe {
     args.extend(auth_args.iter().map(|s| s.to_string()));
     args.push(endpoint.to_string());
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let (stdout, stderr) = run_cmd_both("curl.exe", &arg_refs);
+    let (stdout, stderr) = run_cmd_both(curl_bin(), &arg_refs);
     let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
     if parts.len() >= 3 {
         if let Ok(status) = parts[0].parse::<u16>() {
@@ -426,12 +473,22 @@ pub struct TrustedCertsFile {
 }
 
 fn certs_dir() -> String {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    format!("{}\\DevEnvManager\\certs", appdata)
+    #[cfg(target_os = "linux")]
+    {
+        return linux::data_home().join("devenv").join("certs").to_string_lossy().to_string();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        format!("{}\\DevEnvManager\\certs", appdata)
+    }
 }
 
 fn trusted_certs_path() -> String {
-    format!("{}\\trusted.json", certs_dir())
+    Path::new(&certs_dir())
+        .join("trusted.json")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn read_trusted_certs() -> TrustedCertsFile {
@@ -598,8 +655,19 @@ pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, St
 // ---------------------------------------------------------------------------
 
 fn accounts_path() -> String {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    format!("{}\\DevEnvManager\\accounts.json", appdata)
+    #[cfg(target_os = "linux")]
+    {
+        return linux::config_home()
+            .join("devenv")
+            .join("accounts.json")
+            .to_string_lossy()
+            .to_string();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        format!("{}\\DevEnvManager\\accounts.json", appdata)
+    }
 }
 
 fn read_accounts() -> AccountsFile {
@@ -647,15 +715,18 @@ fn check_whoami(account: &Account) -> Option<String> {
     }
     let whoami_url = format!("{}/-/whoami", u);
 
-    let mut auth_args: Vec<String> = vec![
-        "-sS".to_string(),
-        // 内网私有源吊销服务器不可达时 schannel 报 CRYPT_E_NO_REVOCATION_CHECK，跳过吊销检查
-        "--ssl-no-revoke".to_string(),
+    let mut auth_args: Vec<String> = vec!["-sS".to_string()];
+    // 内网私有源吊销服务器不可达时 schannel 报 CRYPT_E_NO_REVOCATION_CHECK，跳过吊销检查。
+    // 该参数为 Windows schannel 专有，非 Windows curl 不识别。
+    if CURL_SCHANNEL_NO_REVOKE {
+        auth_args.push("--ssl-no-revoke".to_string());
+    }
+    auth_args.extend([
         "-m".to_string(),
         "10".to_string(),
         "-w".to_string(),
         "\n%{http_code}".to_string(),
-    ];
+    ]);
     // 已指纹锚定信任的自签/私有CA host：用 --cacert 锚定验证，避免 whoami 因证书失败
     if let Some((host, port)) = url_host_port(&u) {
         if let Some(pem) = host_pem_path(&host, port) {
@@ -685,7 +756,7 @@ fn check_whoami(account: &Account) -> Option<String> {
     auth_args.push(whoami_url);
     let arg_refs: Vec<&str> = auth_args.iter().map(|s| s.as_str()).collect();
 
-    let out = run_cmd("curl.exe", &arg_refs)?;
+    let out = run_cmd(curl_bin(), &arg_refs)?;
     // 输出 = 响应体 + "\n" + http_code
     let (body, code) = out.rsplit_once('\n')?;
     if code.trim() != "200" {
@@ -923,7 +994,9 @@ fn has_registry_credential(registry: &str, dir: &str) -> bool {
 /// 账号凭据应写入/读取的 .npmrc 路径：项目级账号写项目文件，否则写全局。
 fn npmrc_path_for(account: &Account) -> String {
     match account.project_dir.as_deref() {
-        Some(dir) if !dir.trim().is_empty() => format!("{}\\{}", dir.trim_end_matches('\\'), ".npmrc"),
+        Some(dir) if !dir.trim().is_empty() => {
+            Path::new(dir.trim_end_matches(['\\', '/'])).join(".npmrc").to_string_lossy().to_string()
+        }
         _ => user_npmrc_path(),
     }
 }
@@ -1620,15 +1693,18 @@ fn check_registry_package(registry: String, name: String) -> RegistryPackageChec
         u.pop();
     }
     let url = format!("{}/{}", u, name);
-    let mut args: Vec<String> = vec![
-        "-sS".into(),
-        // 内网私有源吊销服务器不可达时 schannel 报 CRYPT_E_NO_REVOCATION_CHECK，跳过吊销检查
-        "--ssl-no-revoke".into(),
+    let mut args: Vec<String> = vec!["-sS".into()];
+    // 内网私有源吊销服务器不可达时 schannel 报 CRYPT_E_NO_REVOCATION_CHECK，跳过吊销检查。
+    // 该参数为 Windows schannel 专有，非 Windows curl 不识别。
+    if CURL_SCHANNEL_NO_REVOKE {
+        args.push("--ssl-no-revoke".into());
+    }
+    args.extend([
         "-m".into(),
         "10".into(),
         "-w".into(),
         "\n%{http_code}".into(),
-    ];
+    ]);
     if let Some((host, port)) = url_host_port(&u) {
         if let Some(pem) = host_pem_path(&host, port) {
             args.push("--cacert".into());
@@ -1637,7 +1713,7 @@ fn check_registry_package(registry: String, name: String) -> RegistryPackageChec
     }
     args.push(url);
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let (stdout, _stderr) = run_cmd_both("curl.exe", &arg_refs);
+    let (stdout, _stderr) = run_cmd_both(curl_bin(), &arg_refs);
     let (body, code) = stdout.rsplit_once('\n').unwrap_or((stdout.as_str(), "0"));
     match code.trim().parse::<u16>().unwrap_or(0) {
         200 => {
@@ -1675,10 +1751,10 @@ fn check_registry_package(registry: String, name: String) -> RegistryPackageChec
 
 /// 在指定目录跑 npm 命令（自动注入 NODE_EXTRA_CA_CERTS 以信任已锚定的自签证书）。
 fn run_npm_in(dir: &str, args: &[&str]) -> (i32, String) {
-    let all_pem = format!("{}\\all.pem", certs_dir());
-    let mut cmd = new_cmd("npm.cmd");
+    let all_pem = Path::new(&certs_dir()).join("all.pem");
+    let mut cmd = new_cmd(npm_bin());
     cmd.current_dir(dir).args(args);
-    if Path::new(&all_pem).exists() {
+    if all_pem.exists() {
         cmd.env("NODE_EXTRA_CA_CERTS", &all_pem);
     }
     match cmd.output() {
@@ -1711,13 +1787,17 @@ fn prerelease_tag(version: &str) -> Option<String> {
 
 /// 批量发布：每个包 撞车预检 → （可选）构建 → npm publish。
 /// `otp`：一次性验证码（账号 2FA 需要时由前端提示输入后带上重试）。
+/// `dry_run`：Some(true) 时追加 `--dry-run`，只打包演练不真正上传（CLI 发布前预检用）。
+///   Option 使旧的 GUI 调用（不传该参）仍等价于真实发布。
 #[cfg_attr(feature = "gui", tauri::command)]
 fn publish_packages(
     packages: Vec<String>,
     registry: String,
     build: bool,
     otp: Option<String>,
+    dry_run: Option<bool>,
 ) -> Result<Vec<PublishResult>, String> {
+    let dry_run = dry_run.unwrap_or(false);
     let reg = registry.trim().to_string();
     if reg.is_empty() {
         return Err("请填写发布源 registry".to_string());
@@ -1813,6 +1893,9 @@ fn publish_packages(
         if let Some(tag) = &pub_tag {
             npm_args.push("--tag".into());
             npm_args.push(tag.clone());
+        }
+        if dry_run {
+            npm_args.push("--dry-run".into());
         }
         if let Some(otp) = &otp_arg {
             npm_args.push("--otp".into());
@@ -3789,7 +3872,8 @@ fn uninstall_git() -> Result<String, String> {
 
 pub mod api {
     use crate::{
-        NodeEnvInfo, PythonEnvInfo, PythonProjectInfo, PythonVersionsInfo, RegistryResult,
+        AccountsFile, NodeEnvInfo, NpmrcCredential, PkgManagerInfo, ProjectInfo, PublishPackage,
+        PublishResult, PythonEnvInfo, PythonProjectInfo, PythonVersionsInfo, RegistryResult,
         RegistryTestResult, VersionsInfo,
     };
 
@@ -3807,6 +3891,27 @@ pub mod api {
     }
     pub fn set_registry(url: String) -> Result<RegistryResult, String> {
         crate::set_registry(url)
+    }
+    /// npm 镜像测速（probe_curl 已跨平台：linux 用 curl + /dev/null，无 schannel 参数）。
+    pub fn test_registry(url: String) -> RegistryTestResult {
+        crate::test_registry(url)
+    }
+    /// Node 项目解析 / 一键应用（Linux 走自包含后端，避免 Windows 路径/PATH 副作用）。
+    #[cfg(target_os = "linux")]
+    pub fn inspect_project(path: String) -> Result<ProjectInfo, String> {
+        crate::linux::inspect_node_project(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn inspect_project(path: String) -> Result<ProjectInfo, String> {
+        crate::inspect_project(path)
+    }
+    #[cfg(target_os = "linux")]
+    pub fn apply_project(path: String) -> Result<String, String> {
+        crate::linux::apply_node_project(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn apply_project(path: String) -> Result<String, String> {
+        crate::apply_project(path)
     }
     #[cfg(target_os = "linux")]
     pub fn list_versions() -> VersionsInfo {
@@ -3899,15 +4004,35 @@ pub mod api {
     pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
         crate::install_python_specific(version, emit)
     }
+    #[cfg(target_os = "linux")]
+    pub fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
+        crate::linux::inspect_python_project(path)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
         crate::inspect_python_project(path)
     }
+    #[cfg(target_os = "linux")]
+    pub fn apply_python_project(path: String) -> Result<String, String> {
+        crate::linux::apply_python_project(path)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn apply_python_project(path: String) -> Result<String, String> {
         crate::apply_python_project(path)
     }
-    pub fn list_python_pkg_managers() -> Vec<crate::PkgManagerInfo> {
+    #[cfg(target_os = "linux")]
+    pub fn list_python_pkg_managers() -> Vec<PkgManagerInfo> {
+        crate::linux::list_python_pkg_managers()
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn list_python_pkg_managers() -> Vec<PkgManagerInfo> {
         crate::list_python_pkg_managers()
     }
+    #[cfg(target_os = "linux")]
+    pub fn install_python_pkg_manager(name: String, version: Option<String>) -> Result<String, String> {
+        crate::linux::install_python_pkg_manager(name, version)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn install_python_pkg_manager(
         name: String,
         version: Option<String>,
@@ -3940,6 +4065,79 @@ pub mod api {
     #[cfg(not(target_os = "linux"))]
     pub fn uninstall_git() -> Result<String, String> {
         crate::uninstall_git()
+    }
+
+    // ---- bun（独立运行时；Linux 托管 npmmirror zip，Windows 复用包管理器逻辑）----
+    #[cfg(target_os = "linux")]
+    pub fn bun_info() -> PkgManagerInfo {
+        crate::linux::bun_info()
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn bun_info() -> PkgManagerInfo {
+        crate::list_pkg_managers()
+            .into_iter()
+            .find(|p| p.name == "bun")
+            .unwrap_or_else(|| PkgManagerInfo {
+                name: "bun".to_string(),
+                installed: false,
+                version: None,
+                bin_path: None,
+                data_dir: None,
+            })
+    }
+    /// 安装/升级 bun。`version` 为 None 时安装最新版。
+    #[cfg(target_os = "linux")]
+    pub fn install_bun(version: Option<String>, emit: impl Fn(&str)) -> Result<String, String> {
+        crate::linux::install_bun(version.as_deref(), emit)
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn install_bun(version: Option<String>, _emit: impl Fn(&str)) -> Result<String, String> {
+        crate::install_pkg_manager("bun".to_string(), version)
+    }
+    #[cfg(target_os = "linux")]
+    pub fn upgrade_bun() -> Result<String, String> {
+        crate::linux::upgrade_bun()
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn upgrade_bun() -> Result<String, String> {
+        crate::install_pkg_manager("bun".to_string(), Some("latest".to_string()))
+    }
+    #[cfg(target_os = "linux")]
+    pub fn uninstall_bun() -> Result<String, String> {
+        crate::linux::uninstall_bun()
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn uninstall_bun() -> Result<String, String> {
+        crate::uninstall_pkg_manager("bun".to_string())
+    }
+
+    // ---- npm 发布账号（复用 ~/.npmrc 已有凭据；.npmrc/账号路径已跨平台）----
+    pub fn scan_npmrc_credentials() -> Vec<NpmrcCredential> {
+        crate::scan_npmrc_credentials()
+    }
+    pub fn import_npmrc_credential(registry: String) -> Result<AccountsFile, String> {
+        crate::import_npmrc_credential(registry)
+    }
+    pub fn list_accounts() -> AccountsFile {
+        crate::list_accounts()
+    }
+    pub fn switch_account(id: String) -> Result<AccountsFile, String> {
+        crate::switch_account(id)
+    }
+
+    // ---- npm 包发布 ----
+    pub fn list_publish_packages(project_dir: String) -> Result<Vec<PublishPackage>, String> {
+        crate::list_publish_packages(project_dir)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_packages(
+        packages: Vec<String>,
+        registry: String,
+        build: bool,
+        otp: Option<String>,
+        dry_run: Option<bool>,
+    ) -> Result<Vec<PublishResult>, String> {
+        crate::publish_packages(packages, registry, build, otp, dry_run)
     }
 }
 

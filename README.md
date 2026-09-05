@@ -4,7 +4,7 @@
 
 基于 **Rust + Tauri 2** 构建（workspace：核心逻辑在零 GUI 依赖的 `devenv-core`，Tauri 为薄壳），前端使用原生 HTML/CSS/JS（无构建工具依赖）。
 
-> **当前版本：v0.2.4-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
+> **当前版本：v0.2.5-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
 
 ## 快速开始（免 Rust 环境）
 
@@ -12,8 +12,8 @@
 
 | 文件 | 用途 |
 |---|---|
-| `DevEnvManager_0.2.4-beta_x64-setup.exe` | 桌面 GUI（Windows），双击安装后从开始菜单启动 |
-| `devenv-cli-0.2.4-beta-windows-x64.zip` | 命令行工具（Windows，内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
+| `DevEnvManager_0.2.5-beta_x64-setup.exe` | 桌面 GUI（Windows），双击安装后从开始菜单启动 |
+| `devenv-cli-0.2.5-beta-windows-x64.zip` | 命令行工具（Windows，内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
 | `devenv-*-unknown-linux-*.tar.gz` + `install.sh` | 命令行工具（Linux / WSL，见下「Linux / WSL 使用」），无 GUI 依赖，免装 Rust |
 
 使用过程中，**无需预装 Rust / Node / Python / Git**——工具会自行检测，缺失时在应用内一键下载并托管安装（Git 走 npmmirror 镜像的 MinGit，免管理员权限）；需要 Git Bash / 右键菜单时也可一键打开官网完整安装包。
@@ -39,14 +39,14 @@
 curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash
 
 # 安装指定版本（把版本号作为参数传给脚本，注意 bash -s --）
-curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.4-beta
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.5-beta
 ```
 
 > 也可从 [Gitee Releases](https://gitee.com/apricotdream/devEnvMangerTool/releases) 下载 `install.sh` 附件后本地执行（效果相同；当前目录若已有 `devenv-*.tar.gz` 会优先本地安装）：
 >
 > ```bash
 > bash install.sh              # 安装最新版
-> bash install.sh 0.2.4-beta   # 安装指定版本
+> bash install.sh 0.2.5-beta   # 安装指定版本
 > ```
 
 **方式二 · 源码安装**（需 Rust 工具链；无系统 gcc 也能构建，用 musl 静态目标 + rust-lld 自包含链接）：
@@ -144,6 +144,15 @@ devenv node versions                # 已装 + 可用版本
 devenv node install v26.7.0         # 安装版本
 devenv node switch v26.7.0          # 切换版本
 devenv node uninstall v26.7.0       # 卸载版本
+devenv node project [dir]           # 项目管理：解析 .nvmrc/package.json 一键装切 Node
+devenv node test [url]              # npm 镜像测速（省略 url 测当前源 + 常用源）
+devenv node bun status              # bun 运行时状态
+devenv node bun install [ver]       # 安装/升级 bun（独立二进制，npmmirror zip；省略 ver 装最新）
+devenv node bun upgrade             # 升级 bun 到最新
+devenv node bun uninstall           # 卸载托管 bun
+devenv node accounts                # 扫描 ~/.npmrc 已有发布凭据，纳入管理 / 切换
+devenv node publish [--dir D] [--registry R] [--build] [--yes]
+                                    # 发布 npm 包：扫描 → dry-run 预检 → y/N 确认后真发
 
 devenv python status                # Python 环境体检
 devenv python registry              # 查看 pip index
@@ -152,6 +161,10 @@ devenv python versions              # 已装 + 可用版本
 devenv python install 3.12.4        # 安装版本
 devenv python switch 3.12.4         # 切换版本
 devenv python uninstall 3.12.4      # 卸载版本
+devenv python project [dir]         # 项目管理：解析 .python-version/pyproject 等一键装切 Python
+devenv python test [url]            # pip 镜像测速
+devenv python pkg list              # 列出 pip/uv/poetry/pipenv/conda 状态
+devenv python pkg install [name]    # 安装 uv/poetry/pipenv（pip --user → 共享 ~/.local/bin）
 
 devenv git status                   # Git / OpenSSH 体检（版本、路径；缺失给安装命令）
 devenv git versions                 # 可安装版本（Win 镜像版；Linux 给包管理器命令）
@@ -174,6 +187,8 @@ devenv git sync <repo>              # 同步仓库
 > **数字选择**：在命令行里，凡是「选版本 / 选账号」的参数位置直接填**数字**即按 `versions`/`accounts` 列表序号选择（如 `devenv node install 3`、`devenv git switch 2`、`devenv git key 1`）；省略该参数则进入交互数字菜单（`[1] [2] …`，`q` 取消）；也仍可填完整版本号 / 别名（如 `devenv node install v22.23.2`、`devenv git switch gitee`）。序号以对应 `devenv node/python versions`、`devenv git accounts` 的列表为准。
 >
 > **Git 安装 / 账号写入在 Linux 的差异**：Git 由系统包管理器托管（强依赖系统库、需 root），`devenv git install` 在 Linux 上只打印对应的 `sudo apt/dnf/… install` 命令，不代为执行；账号增删改、SSH 密钥生成、身份切换等与 Windows 完全一致（写 `~/.ssh/config` + `~/.ssh/id_rsa_<别名>`）。
+>
+> **Linux 上的 Node/Python 对齐项**：`node project` / `python project` 解析项目版本声明并自动装切；`node test` / `python test` 用 curl 探测镜像延迟。**bun** 在 Linux 由本工具托管（npmmirror 下载 zip → `unzip` 解压 → 软链进 `~/.local/bin`，需系统已装 `unzip`，缺失时给出 `sudo apt/dnf/… install unzip` 提示），独立于 node。**Python 包管理器**（uv/poetry/pipenv）通过 `pip install --user` 装到**共享 `~/.local/bin`（真实文件）**，切换/卸载 Python 版本后仍然可用。**npm 发布**复用 `~/.npmrc` 已有凭据（先 `npm login`，再 `devenv node accounts` 纳入管理），发布前**强制 `--dry-run` 预检**、确认后才真发（`--yes` 跳过确认）。
 
 ## 技术栈
 
@@ -225,7 +240,7 @@ publish-release.cmd
 ```bash
 # Linux / WSL：curl 一键安装（自动匹配架构 x64/arm64、libc gnu/musl 与最新版本）
 curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash
-curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.4-beta  # 指定版本
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.5-beta  # 指定版本
 ```
 
 > 发版前需先把改动合并到 `main`（脚本基于 `origin/main` 打 tag）。版本号在 `core/Cargo.toml`、`src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 三处同步递增；tag 命名为 `v<版本号>`（如 `v0.2.1-beta`），已存在的 tag 会被脚本拒绝。
@@ -255,6 +270,17 @@ curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh |
 ```
 
 ## 更新日志
+
+### v0.2.5-beta
+- **Linux CLI 与桌面端功能对齐（8 项）**：本轮把桌面端已有、CLI 缺失的能力补齐到 Linux/WSL `devenv`。
+- **Node 项目管理**：`devenv node project [dir]` 解析 `.nvmrc` / `package.json`（engines、packageManager）/ 项目 `.npmrc`，一键安装并切换到要求的 Node 版本（corepack 缺失时跳过）。
+- **Python 项目管理**：`devenv python project [dir]` 解析 `.python-version` / `pyproject.toml`（requires-python、tool）/ `runtime.txt` / `Pipfile`，一键装切 Python。
+- **镜像测速**：`devenv node test [url]`（npm registry）、`devenv python test [url]`（PyPI `simple/`），探测可达性、HTTP 状态与延迟；省略 URL 测当前源 + 常用源。
+- **Python 包管理器**：`devenv python pkg list|install`，管理 pip / uv / poetry / pipenv / conda；uv/poetry/pipenv 通过 `pip install --user` 装到**共享 `~/.local/bin`（真实文件）**，切换/卸载 Python 版本后仍可用。
+- **bun 托管**：`devenv node bun status|install|upgrade|uninstall`——独立二进制（不依赖 node），从 npmmirror 下载 zip、`unzip` 解压后软链进 `~/.local/bin`（缺 unzip 给出安装提示），gnu/musl × x64/arm64 自动匹配。
+- **npm 发布账号（CLI）**：`devenv node accounts` 扫描 `~/.npmrc` 已有凭据（npm login 写入）、检测连通性，一键「纳入管理」并切换激活（不提供粘贴 token 向导）。
+- **npm 包发布（CLI）**：`devenv node publish` 扫描根包与 `packages/`（monorepo），**发布前强制 `--dry-run` 预检**，y/N 确认后才真发（`--yes` 跳过确认），遇 2FA 提示输入 OTP。
+- 共享层去 Windows 硬编码（`npm`/`curl`/`/dev/null`/证书与账号路径跨平台），Windows 桌面端行为不变。
 
 ### v0.2.4-beta
 - **Linux / WSL 完整支持（CLI）**：拆分为 Rust workspace——`devenv-core`（`core/`，跨平台、零 GUI/webkit/gtk 依赖）+ `src-tauri`（Tauri 薄壳，仅 Windows）。`devenv` CLI 在无桌面 Linux/服务器/WSL2 上可用。
