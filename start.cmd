@@ -38,7 +38,7 @@ echo [OK] 编译完成
 
 REM ---------- 4. 启动 ----------
 echo [2/2] 启动 DevEnvManager...
-start "" "%~dp0src-tauri\target\debug\dev-env-manager.exe"
+start "" "%~dp0target\debug\dev-env-manager.exe"
 echo.
 echo 应用已启动。如需开发调试，可在 src-tauri 目录运行：cargo tauri dev
 timeout /t 2 >nul

@@ -126,7 +126,7 @@ REM   4. Collect artifacts into dist\
 REM -----------------------------------------------------
 echo [4/6] Collecting artifacts ...
 set "SETUP_EXE="
-for %%f in ("%SRC_TAURI%\target\release\bundle\nsis\*setup.exe") do set "SETUP_EXE=%%f"
+for %%f in ("%~dp0target\release\bundle\nsis\*setup.exe") do set "SETUP_EXE=%%f"
 if not defined SETUP_EXE (
     echo [ERROR] NSIS installer not found.
     exit /b 1
@@ -135,7 +135,7 @@ copy /y "%SETUP_EXE%" "%OUT%\" >nul
 echo [OK] Installer : %SETUP_EXE%
 
 set "CLI_ZIP=%OUT%\devenv-cli-%VERSION%-windows-%ARCH%.zip"
-powershell -NoProfile -Command "Compress-Archive -Path '%SRC_TAURI%\target\release\devenv.exe' -DestinationPath '%CLI_ZIP%' -Force"
+powershell -NoProfile -Command "Compress-Archive -Path '%~dp0target\release\devenv.exe' -DestinationPath '%CLI_ZIP%' -Force"
 if errorlevel 1 (
     echo [ERROR] CLI packaging failed.
     exit /b 1

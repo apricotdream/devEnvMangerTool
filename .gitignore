@@ -1,6 +1,7 @@
 # ============ 构建产物 ============
 # Rust/Tauri
-src-tauri/target/
+target/
+core/target/
 src-tauri/gen/schemas/
 
 # Node（若后续引入构建工具）
@@ -21,9 +22,10 @@ build-release.cmd
 .vscode/
 *.swp
 
-# ============ AI 工具（Claude Code） ============
+# ============ AI 工具（Claude Code / Refact 等） ============
 # 配置/记忆目录 + 项目级 AI 指令
 .claude/
+.refact/
 CLAUDE.md
 
 # ============ AI 生成的临时文件 ============

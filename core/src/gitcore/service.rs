@@ -1171,6 +1171,7 @@ fn missing_command_message(name: &str) -> String {
 fn mkdir_dir(path: &Path) -> Result<(), Error> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::DirBuilderExt;
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
         builder

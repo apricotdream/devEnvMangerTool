@@ -1,0 +1,28 @@
+[package]
+name = "devenv-core"
+version = "0.2.4-beta"
+description = "DevEnvManager 核心逻辑（跨平台，无 GUI 依赖）"
+authors = ["DevEnvManager"]
+edition = "2021"
+
+[features]
+default = []
+# 启用 Tauri GUI 命令层；CLI 构建关闭此 feature，完全不链接 webkit/gtk。
+gui = ["dep:tauri", "dep:tauri-plugin-dialog"]
+
+[dependencies]
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+base64 = "0.22"
+thiserror = "2"
+dirs = "6"
+chrono = "0.4"
+indexmap = { version = "2", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "devenv"
+path = "src/bin/devenv.rs"

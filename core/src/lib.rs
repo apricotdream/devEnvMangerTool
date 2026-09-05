@@ -1,15 +1,22 @@
-//! DevEnvManager Tauri 后端。
+//! DevEnvManager 核心逻辑（跨平台，无 GUI 依赖）。
 //!
-//! 策略：尽量复用 Windows 自带工具（curl.exe / tar.exe / powershell），
-//! 减少第三方依赖与编译风险。检测在 Rust 内完成，网络探测与下载走 curl。
+//! 策略：尽量复用平台自带工具（Windows: curl.exe / tar.exe / powershell；
+//! Linux: curl / tar），减少第三方依赖与编译风险。检测在 Rust 内完成，
+//! 网络探测与下载走 curl。
+#![cfg_attr(target_os = "linux", allow(dead_code))] // Linux 构建不启用 Windows 后端函数（经平台分派保留）
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// GUI 命令层（依赖 tauri）。仅在 `gui` feature 下编译；CLI 构建完全不链接 tauri/webkit。
+#[cfg(feature = "gui")]
 mod git_cmds;
 pub mod gitcore;
+// Linux 后端（Node/Python 自管安装 + 软链切换），仅 Linux 目标编译。
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 // ---------------------------------------------------------------------------
 // 数据结构（字段名对齐前端 camelCase）
@@ -136,6 +143,7 @@ pub struct NvmInfo {
 /// 构造子进程命令。Windows 上统一加 `CREATE_NO_WINDOW`，
 /// 否则 node / npm.cmd / curl / powershell 等控制台子进程会弹出黑窗并闪烁。
 pub(crate) fn new_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
@@ -187,9 +195,16 @@ pub fn user_npmrc_path() -> String {
     if let Ok(p) = std::env::var("NPM_CONFIG_USERCONFIG") {
         return p;
     }
-    std::env::var("USERPROFILE")
-        .map(|h| format!("{}\\{}", h, ".npmrc"))
-        .unwrap_or_else(|_| ".npmrc".to_string())
+    #[cfg(target_os = "linux")]
+    {
+        return linux::npmrc_path().to_string_lossy().to_string();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::var("USERPROFILE")
+            .map(|h| format!("{}\\{}", h, ".npmrc"))
+            .unwrap_or_else(|_| ".npmrc".to_string())
+    }
 }
 
 fn node_install_root() -> String {
@@ -698,7 +713,7 @@ pub struct NpmrcCredential {
 }
 
 /// 扫描全局 ~/.npmrc 中已存在的账号凭据，排除本工具已管理的账号，并检测连通性。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn scan_npmrc_credentials() -> Vec<NpmrcCredential> {
     let content = match std::fs::read_to_string(user_npmrc_path()) {
         Ok(c) => c,
@@ -785,7 +800,7 @@ fn v_after<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
 
 /// 把 ~/.npmrc 中指定 registry 的外部凭据纳入本工具管理（写入 accounts.json）。
 /// 凭据本身仍保留在 ~/.npmrc，这里只是登记，使其可在发布/账号列表中管理。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn import_npmrc_credential(registry: String) -> Result<AccountsFile, String> {
     let reg = registry.trim().trim_end_matches('/').to_string();
     let content = std::fs::read_to_string(user_npmrc_path()).map_err(|e| format!("读取 ~/.npmrc 失败：{}", e))?;
@@ -1284,7 +1299,7 @@ fn detect_still_active(install_root: &str, version: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// 检测 Node 环境：安装状态 / 版本 / 商店假命令 / PATH / 网络连通性。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn detect_node() -> NodeEnvInfo {
     let mut info = NodeEnvInfo::default();
 
@@ -1336,7 +1351,7 @@ fn detect_node() -> NodeEnvInfo {
 }
 
 /// 读取全局 .npmrc 中的 registry。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn read_registry() -> Result<Option<String>, String> {
     let path = user_npmrc_path();
     // 文件不存在 = 未配置 registry，语义上是 Ok(None)，不是错误。
@@ -1355,7 +1370,7 @@ fn read_registry() -> Result<Option<String>, String> {
 }
 
 /// 写入 registry 到全局 .npmrc（自动备份 .bak）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn set_registry(url: String) -> Result<RegistryResult, String> {
     let path = user_npmrc_path();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1379,7 +1394,7 @@ fn set_registry(url: String) -> Result<RegistryResult, String> {
 }
 
 /// 将目录追加到用户级 PATH（通过 PowerShell，去重）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn fix_path(dir: String) -> Result<PathResult, String> {
     let ps = format!(
         "$d='{}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
@@ -1398,7 +1413,7 @@ fn fix_path(dir: String) -> Result<PathResult, String> {
 }
 
 /// 测试 registry 连通性：真实拉取 {url}/debug 包元数据。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn test_registry(url: String) -> RegistryTestResult {
     let mut u = url.trim().to_string();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
@@ -1415,13 +1430,13 @@ fn test_registry(url: String) -> RegistryTestResult {
 // ---------------------------------------------------------------------------
 
 /// 抓取指定 registry 的证书信息（用于「证书不受信任」提示弹窗）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn probe_cert(registry: String) -> Result<CertInfo, String> {
     fetch_cert_info(&registry)
 }
 
 /// 接受并信任指定 registry 的证书：落盘 PEM + 记录指纹 + 合并 NODE_EXTRA_CA_CERTS。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn accept_cert(registry: String) -> Result<CertInfo, String> {
     let info = fetch_cert_info(&registry)?;
     let sha = info.sha256.clone().ok_or_else(|| "未获取到证书指纹".to_string())?;
@@ -1447,12 +1462,12 @@ fn accept_cert(registry: String) -> Result<CertInfo, String> {
     Ok(info)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_trusted_certs() -> TrustedCertsFile {
     read_trusted_certs()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn remove_trusted_cert(host: String, port: u16) -> Result<TrustedCertsFile, String> {
     let mut tf = read_trusted_certs();
     let removed: Vec<TrustedCert> = tf
@@ -1561,7 +1576,7 @@ fn find_package_jsons(root: &str) -> Vec<std::path::PathBuf> {
     out
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_publish_packages(project_dir: String) -> Result<Vec<PublishPackage>, String> {
     let root = Path::new(&project_dir);
     if !root.is_dir() {
@@ -1598,7 +1613,7 @@ fn list_publish_packages(project_dir: String) -> Result<Vec<PublishPackage>, Str
 }
 
 /// 检查某个包在 registry 上是否已存在（版本撞车预检）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn check_registry_package(registry: String, name: String) -> RegistryPackageCheck {
     let mut u = registry.trim().to_string();
     while u.ends_with('/') {
@@ -1696,7 +1711,7 @@ fn prerelease_tag(version: &str) -> Option<String> {
 
 /// 批量发布：每个包 撞车预检 → （可选）构建 → npm publish。
 /// `otp`：一次性验证码（账号 2FA 需要时由前端提示输入后带上重试）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn publish_packages(
     packages: Vec<String>,
     registry: String,
@@ -1861,7 +1876,7 @@ fn publish_packages(
 }
 
 /// 检查 npm/Node 侧证书信任环境（NODE_EXTRA_CA_CERTS 是否指向工具管理的 all.pem）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn check_node_extra_ca() -> NodeCaInfo {
     let all_pem = format!("{}\\all.pem", certs_dir());
     let all_pem_exists = Path::new(&all_pem).exists();
@@ -1876,7 +1891,8 @@ fn check_node_extra_ca() -> NodeCaInfo {
 }
 
 /// 从 npmmirror 下载安装最新 LTS Node，通过事件上报阶段进度。
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn install_node(app: tauri::AppHandle) -> Result<InstallResult, String> {
     use tauri::Emitter;
 
@@ -1910,12 +1926,12 @@ fn install_node(app: tauri::AppHandle) -> Result<InstallResult, String> {
 // Tauri 命令：上传登录配置
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_accounts() -> AccountsFile {
     read_accounts()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn save_account(account: Account) -> Result<AccountsFile, String> {
     let mut file = read_accounts();
     let id = account.id.clone();
@@ -1945,7 +1961,7 @@ fn save_account(account: Account) -> Result<AccountsFile, String> {
     Ok(file)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn delete_account(id: String) -> Result<AccountsFile, String> {
     let mut file = read_accounts();
     let target = file.accounts.iter().find(|a| a.id == id).cloned();
@@ -1961,7 +1977,7 @@ fn delete_account(id: String) -> Result<AccountsFile, String> {
     Ok(file)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn switch_account(id: String) -> Result<AccountsFile, String> {
     let mut file = read_accounts();
     let account = file
@@ -1976,7 +1992,7 @@ fn switch_account(id: String) -> Result<AccountsFile, String> {
     Ok(file)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn test_account(id: String) -> RegistryTestResult {
     let file = read_accounts();
     let account = match file.accounts.iter().find(|a| a.id == id) {
@@ -2026,7 +2042,7 @@ fn test_account(id: String) -> RegistryTestResult {
 // Tauri 命令：Node 版本管理
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_versions() -> VersionsInfo {
     let install_dir = node_install_root();
     let current = detect_current_node_version();
@@ -2058,7 +2074,8 @@ fn list_versions() -> VersionsInfo {
     }
 }
 
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn install_version(app: tauri::AppHandle, version: String) -> Result<InstallResult, String> {
     use tauri::Emitter;
 
@@ -2085,7 +2102,7 @@ fn install_version(app: tauri::AppHandle, version: String) -> Result<InstallResu
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn switch_version(version: String) -> Result<String, String> {
     if detect_nvm() {
         return Err("检测到 nvm 管理器，请先卸载 nvm 后再使用版本切换".to_string());
@@ -2100,7 +2117,7 @@ fn switch_version(version: String) -> Result<String, String> {
 }
 
 /// 探测 nvm 安装信息：目录 + PATH 条目（用于卸载预览）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn nvm_info() -> NvmInfo {
     let appdata = std::env::var("APPDATA").unwrap_or_default();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -2195,7 +2212,7 @@ fn delete_path_robust(path: &Path) -> Result<(), String> {
 }
 
 /// 卸载 nvm：删除 nvm 目录 + 清理用户 PATH + 提权清理系统 PATH。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn uninstall_nvm() -> Result<String, String> {
     let info = nvm_info();
     if !info.detected {
@@ -2230,7 +2247,7 @@ fn uninstall_nvm() -> Result<String, String> {
     Ok(msg)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn uninstall_version(version: String) -> Result<String, String> {
     uninstall_managed_version(
         &node_install_root(),
@@ -2325,7 +2342,7 @@ fn pkg_actual_data_dir(name: &str, user: &str, local: &str) -> String {
 }
 
 /// 列出包管理器状态（已装/版本/位置/数据目录）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_pkg_managers() -> Vec<PkgManagerInfo> {
     let user = std::env::var("USERPROFILE").unwrap_or_default();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -2355,7 +2372,7 @@ fn list_pkg_managers() -> Vec<PkgManagerInfo> {
 }
 
 /// 安装/切换包管理器版本。npm 生态走 `npm i -g`，bun 走独立升级。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn install_pkg_manager(name: String, version: Option<String>) -> Result<String, String> {
     let ver = version.unwrap_or_else(|| "latest".to_string());
     if name == "bun" {
@@ -2385,7 +2402,7 @@ fn install_pkg_manager(name: String, version: Option<String>) -> Result<String, 
 
 /// 卸载包管理器并连带删除其数据/缓存目录。
 /// pnpm/yarn/cnpm/pm2 走 `npm uninstall -g`；bun 删 ~/.bun 并清 PATH/BUN_INSTALL。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn uninstall_pkg_manager(name: String) -> Result<String, String> {
     let user = std::env::var("USERPROFILE").unwrap_or_default();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -2434,7 +2451,7 @@ fn uninstall_pkg_manager(name: String) -> Result<String, String> {
 
 /// 切换包管理器数据目录：迁移旧数据（robocopy /MOVE）并更新指向。
 /// pm2 用 PM2_HOME；bun 用 BUN_INSTALL；yarn 用 YARN_CACHE_FOLDER；pnpm 用 store-dir 配置。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn switch_pkg_data_dir(name: String, target: String) -> Result<String, String> {
     let user = std::env::var("USERPROFILE").unwrap_or_default();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -2568,7 +2585,7 @@ fn resolve_nvmrc(content: &str) -> Option<String> {
 }
 
 /// 解析项目目录，返回项目要求的 Node/包管理器/registry，并与全局对比。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn inspect_project(path: String) -> Result<ProjectInfo, String> {
     let p = Path::new(&path);
     if !p.is_dir() {
@@ -2647,7 +2664,7 @@ fn inspect_project(path: String) -> Result<ProjectInfo, String> {
 }
 
 /// 应用项目配置：安装+切换 Node 版本，激活包管理器。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn apply_project(path: String) -> Result<String, String> {
     let info = inspect_project(path.clone())?;
     let mut msgs = Vec::new();
@@ -2694,7 +2711,7 @@ fn project_config_file_path(project: &str, name: &str) -> Result<PathBuf, String
 }
 
 /// 读取项目配置文件内容（仅限白名单文件）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn read_project_file(path: String, name: String) -> Result<String, String> {
     let f = project_config_file_path(&path, &name)?;
     if !f.exists() {
@@ -2704,7 +2721,7 @@ fn read_project_file(path: String, name: String) -> Result<String, String> {
 }
 
 /// 写回项目配置文件内容（仅限白名单文件）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn write_project_file(path: String, name: String, content: String) -> Result<String, String> {
     let f = project_config_file_path(&path, &name)?;
     std::fs::write(&f, &content).map_err(|e| format!("写入失败: {}", e))?;
@@ -2994,17 +3011,24 @@ fn update_user_path_for_python(target: &str) -> Result<(), String> {
     }
 }
 
-/// 读取 pip 配置文件（%APPDATA%\pip\pip.ini 或 PIP_CONFIG_FILE）。
+/// 读取 pip 配置文件（%APPDATA%\pip\pip.ini / Linux $XDG_CONFIG_HOME/pip/pip.conf，或 PIP_CONFIG_FILE）。
 fn pip_ini_path() -> String {
     if let Ok(p) = std::env::var("PIP_CONFIG_FILE") {
         return p;
     }
-    std::env::var("APPDATA")
-        .map(|a| format!("{}\\pip\\pip.ini", a))
-        .unwrap_or_else(|_| "pip.ini".to_string())
+    #[cfg(target_os = "linux")]
+    {
+        return linux::pip_config_path().to_string_lossy().to_string();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::var("APPDATA")
+            .map(|a| format!("{}\\pip\\pip.ini", a))
+            .unwrap_or_else(|_| "pip.ini".to_string())
+    }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn detect_python() -> PythonEnvInfo {
     let mut info = PythonEnvInfo::default();
 
@@ -3090,7 +3114,7 @@ fn detect_python() -> PythonEnvInfo {
     info
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_python_versions() -> PythonVersionsInfo {
     let install_dir = python_install_root();
     let current = detect_current_python_version();
@@ -3124,7 +3148,8 @@ fn list_python_versions() -> PythonVersionsInfo {
     }
 }
 
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn install_python_version(app: tauri::AppHandle, version: String) -> Result<InstallResult, String> {
     use tauri::Emitter;
 
@@ -3149,7 +3174,7 @@ fn install_python_version(app: tauri::AppHandle, version: String) -> Result<Inst
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn switch_python_version(version: String) -> Result<String, String> {
     let install_dir = python_install_root();
     let target = format!("{}\\{}", install_dir, version);
@@ -3160,7 +3185,7 @@ fn switch_python_version(version: String) -> Result<String, String> {
     Ok(target)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn uninstall_python_version(version: String) -> Result<String, String> {
     uninstall_managed_version(
         &python_install_root(),
@@ -3171,7 +3196,7 @@ fn uninstall_python_version(version: String) -> Result<String, String> {
 }
 
 /// 读取 pip 全局 index-url。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn read_pip_index() -> Result<Option<String>, String> {
     let path = pip_ini_path();
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -3199,7 +3224,7 @@ fn read_pip_index() -> Result<Option<String>, String> {
 }
 
 /// 写入 pip 全局 index-url（[global] 段，自动备份 .bak）。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn set_pip_index(url: String) -> Result<RegistryResult, String> {
     let path = pip_ini_path();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -3284,7 +3309,7 @@ fn probe_pypi_endpoint(registry_base: &str, auth_args: &[&str]) -> RegistryTestR
     result
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn test_pypi(url: String) -> RegistryTestResult {
     let mut u = url.trim().to_string();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
@@ -3352,7 +3377,7 @@ fn parse_requires_python(spec: &str) -> Option<String> {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
     let p = Path::new(&path);
     if !p.is_dir() {
@@ -3454,7 +3479,7 @@ fn inspect_python_project(path: String) -> Result<PythonProjectInfo, String> {
 }
 
 /// 应用项目配置：安装+切换要求的 Python 版本。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn apply_python_project(path: String) -> Result<String, String> {
     let info = inspect_python_project(path.clone())?;
     let mut msgs = Vec::new();
@@ -3487,7 +3512,7 @@ fn python_pkg_data_dir(name: &str, user: &str, local: &str) -> String {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_python_pkg_managers() -> Vec<PkgManagerInfo> {
     let user = std::env::var("USERPROFILE").unwrap_or_default();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -3519,7 +3544,7 @@ fn list_python_pkg_managers() -> Vec<PkgManagerInfo> {
     out
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn install_python_pkg_manager(name: String, version: Option<String>) -> Result<String, String> {
     let ver = version.unwrap_or_else(|| "latest".to_string());
     match name.as_str() {
@@ -3588,7 +3613,7 @@ fn find_git() -> Option<PathBuf> {
 }
 
 /// 检测 Git / OpenSSH：安装状态、版本、可执行路径。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn detect_git() -> GitEnvInfo {
     use crate::gitcore::platform;
     let env: &dyn Fn(&str) -> Option<String> = &|k| std::env::var(k).ok();
@@ -3660,7 +3685,7 @@ fn parse_git_releases(html: &str) -> Vec<GitRelease> {
         .collect()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn git_versions() -> Vec<GitRelease> {
     fetch_git_releases()
 }
@@ -3726,7 +3751,8 @@ fn install_git(version: &str, tag: &str, emit: impl Fn(&str)) -> Result<String, 
     Ok(root)
 }
 
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn install_git_version(app: tauri::AppHandle, version: String, tag: String) -> Result<String, String> {
     use tauri::Emitter;
     let _ = app.emit("git-install-progress", serde_json::json!({ "stage": "connecting" }));
@@ -3741,7 +3767,7 @@ fn install_git_version(app: tauri::AppHandle, version: String, tag: String) -> R
 
 /// 卸载托管的 MinGit：先从用户 PATH 撤出 cmd 目录，再删安装根。
 /// 只作用于自管根目录；检测到完整 Git for Windows（有 git-bash.exe）则拒绝，避免误删用户环境。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn uninstall_git() -> Result<String, String> {
     let root = git_install_root();
     let root_path = Path::new(&root);
@@ -3758,7 +3784,7 @@ fn uninstall_git() -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// CLI API（无 GUI 版本复用，不含 #[tauri::command] 宏）
+// CLI API（无 GUI 版本复用，不含 #[cfg_attr(feature = "gui", tauri::command)] 宏）
 // ---------------------------------------------------------------------------
 
 pub mod api {
@@ -3767,6 +3793,12 @@ pub mod api {
         RegistryTestResult, VersionsInfo,
     };
 
+    // ---- Node（Linux 走 linux 后端：tarball + 软链；其余平台走原 Windows 逻辑）----
+    #[cfg(target_os = "linux")]
+    pub fn detect_node() -> NodeEnvInfo {
+        crate::linux::detect_node()
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn detect_node() -> NodeEnvInfo {
         crate::detect_node()
     }
@@ -3776,23 +3808,53 @@ pub mod api {
     pub fn set_registry(url: String) -> Result<RegistryResult, String> {
         crate::set_registry(url)
     }
+    #[cfg(target_os = "linux")]
+    pub fn list_versions() -> VersionsInfo {
+        crate::linux::list_versions()
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn list_versions() -> VersionsInfo {
         crate::list_versions()
     }
+    #[cfg(target_os = "linux")]
+    pub fn switch_version(version: String) -> Result<String, String> {
+        crate::linux::switch_node(version)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn switch_version(version: String) -> Result<String, String> {
         crate::switch_version(version)
     }
+    #[cfg(target_os = "linux")]
+    pub fn uninstall_version(version: String) -> Result<String, String> {
+        crate::linux::uninstall_node(version)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn uninstall_version(version: String) -> Result<String, String> {
         crate::uninstall_version(version)
     }
+    #[cfg(target_os = "linux")]
+    pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
+        crate::linux::install_node(version, emit)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
         crate::install_specific(version, emit)
     }
+    #[cfg(target_os = "linux")]
+    pub fn detect_nvm() -> bool {
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn detect_nvm() -> bool {
         crate::detect_nvm()
     }
 
-    // ---- Python ----
+    // ---- Python（同上分派）----
+    #[cfg(target_os = "linux")]
+    pub fn detect_python() -> PythonEnvInfo {
+        crate::linux::detect_python()
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn detect_python() -> PythonEnvInfo {
         crate::detect_python()
     }
@@ -3805,15 +3867,35 @@ pub mod api {
     pub fn test_pypi(url: String) -> RegistryTestResult {
         crate::test_pypi(url)
     }
+    #[cfg(target_os = "linux")]
+    pub fn list_python_versions() -> PythonVersionsInfo {
+        crate::linux::list_python_versions()
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn list_python_versions() -> PythonVersionsInfo {
         crate::list_python_versions()
     }
+    #[cfg(target_os = "linux")]
+    pub fn switch_python_version(version: String) -> Result<String, String> {
+        crate::linux::switch_python(version)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn switch_python_version(version: String) -> Result<String, String> {
         crate::switch_python_version(version)
     }
+    #[cfg(target_os = "linux")]
+    pub fn uninstall_python_version(version: String) -> Result<String, String> {
+        crate::linux::uninstall_python(version)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn uninstall_python_version(version: String) -> Result<String, String> {
         crate::uninstall_python_version(version)
     }
+    #[cfg(target_os = "linux")]
+    pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
+        crate::linux::install_python(version, emit)
+    }
+    #[cfg(not(target_os = "linux"))]
     pub fn install_python_specific(version: &str, emit: impl Fn(&str)) -> Result<String, String> {
         crate::install_python_specific(version, emit)
     }
@@ -3832,13 +3914,51 @@ pub mod api {
     ) -> Result<String, String> {
         crate::install_python_pkg_manager(name, version)
     }
+
+    // ---- Git（CLI 体检 / 版本 / 安装）----
+    #[cfg(target_os = "linux")]
+    pub fn detect_git() -> crate::GitEnvInfo {
+        crate::linux::detect_git()
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn detect_git() -> crate::GitEnvInfo {
+        crate::detect_git()
+    }
+    /// 可安装的 Git 版本。Windows 为镜像最新 3 个稳定版；Linux 由系统包管理器托管，返回空。
+    #[cfg(not(target_os = "linux"))]
+    pub fn git_versions() -> Vec<crate::GitRelease> {
+        crate::git_versions()
+    }
+    /// 托管安装 Git。Windows 下载解压 MinGit 并写 PATH；Linux 不托管（返回提示错误）。
+    #[cfg(not(target_os = "linux"))]
+    pub fn install_git(version: &str, tag: &str, emit: impl Fn(&str)) -> Result<String, String> {
+        let dir = crate::install_git(version, tag, emit)?;
+        crate::fix_path(format!("{}\\cmd", dir))?;
+        Ok(dir)
+    }
+    /// 卸载本工具托管的 MinGit（仅 Windows）。
+    #[cfg(not(target_os = "linux"))]
+    pub fn uninstall_git() -> Result<String, String> {
+        crate::uninstall_git()
+    }
 }
 
 /// 列出各模块的配置文件/目录（Node / Python / Git / 工具自身），供前端「打开配置目录」使用。
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 fn list_config_dirs() -> Vec<serde_json::Value> {
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    #[allow(unused_variables)]
+    let (home, appdata) = {
+        (
+            linux::home_dir().to_string_lossy().to_string(),
+            linux::install_root().to_string_lossy().to_string(),
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (home, appdata) = (
+        std::env::var("USERPROFILE").unwrap_or_default(),
+        std::env::var("APPDATA").unwrap_or_default(),
+    );
 
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut add = |name: &str, path: String| {
@@ -3847,17 +3967,34 @@ fn list_config_dirs() -> Vec<serde_json::Value> {
     };
 
     // Node.js
-    add("npm 全局配置 (.npmrc)", format!("{}\\.npmrc", home));
-    add("npm 全局目录 (prefix)", format!("{}\\npm", appdata));
+    #[cfg(target_os = "linux")]
+    {
+        add("npm 全局配置 (.npmrc)", linux::npmrc_path().to_string_lossy().to_string());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        add("npm 全局配置 (.npmrc)", format!("{}\\.npmrc", home));
+        add("npm 全局目录 (prefix)", format!("{}\\npm", appdata));
+        add("nvm 安装目录", format!("{}\\nvm", appdata));
+    }
     add("Node 版本安装目录", node_install_root());
-    add("nvm 安装目录", format!("{}\\nvm", appdata));
     // Python
-    add("pip 配置 (pip.ini)", format!("{}\\pip\\pip.ini", appdata));
+    #[cfg(target_os = "linux")]
+    {
+        add("pip 配置 (pip.conf)", linux::pip_config_path().to_string_lossy().to_string());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        add("pip 配置 (pip.ini)", format!("{}\\pip\\pip.ini", appdata));
+    }
     add("Python 版本安装目录", python_install_root());
     // Git
     add("SSH 密钥目录 (.ssh)", format!("{}\\.ssh", home));
     add("Git 全局配置 (.gitconfig)", format!("{}\\.gitconfig", home));
     // 工具自身
+    #[cfg(target_os = "linux")]
+    add("DevEnvManager 配置目录", linux::install_root().to_string_lossy().to_string());
+    #[cfg(not(target_os = "linux"))]
     add("DevEnvManager 配置目录", format!("{}\\DevEnvManager", appdata));
 
     items
@@ -3867,8 +4004,12 @@ fn list_config_dirs() -> Vec<serde_json::Value> {
 // 应用入口
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+/// 构建 Tauri 应用：注册插件、Git 服务状态与全部命令。
+///
+/// 仅在 `gui` feature 下可用。`generate_context!`（依赖 tauri.conf.json）由
+/// src-tauri 壳在自己的 crate 内调用，故这里返回 Builder，由壳负责 `.run(context)`。
+#[cfg(feature = "gui")]
+pub fn app_builder() -> tauri::Builder<tauri::Wry> {
     let service = gitcore::service::Service::new(None).expect("初始化 Git 服务失败");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -3948,13 +4089,11 @@ pub fn run() {
             uninstall_git,
             list_config_dirs
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }
 
 #[cfg(test)]
 mod git_release_tests {
-    use super::parse_git_releases;
+    use super::{parse_git_releases, parse_mingit_asset};
 
     #[test]
     fn picks_latest_three_stable_and_highest_respin() {

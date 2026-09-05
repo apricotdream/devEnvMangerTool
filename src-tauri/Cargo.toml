@@ -1,6 +1,6 @@
 [package]
 name = "dev-env-manager"
-version = "0.2.3-beta"
+version = "0.2.4-beta"
 description = "开发环境管理工具 (Tauri)"
 authors = ["DevEnvManager"]
 edition = "2021"
@@ -10,23 +10,9 @@ default-run = "dev-env-manager"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# GUI 壳：启用 core 的 gui feature（含 tauri 命令层）。
+devenv-core = { path = "../core", features = ["gui"] }
 tauri = { version = "2", features = [] }
+# 直接依赖：tauri-build 在构建期校验 capabilities（dialog:default）时需要能发现该插件。
 tauri-plugin-dialog = "2"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-regex = "1"
-base64 = "0.22"
-thiserror = "2"
-dirs = "6"
-chrono = "0.4"
-indexmap = { version = "2", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-
-[[bin]]
-name = "devenv"
-path = "src/bin/devenv.rs"
-
-[profile.release]
-strip = true
-lto = true
-codegen-units = 1
