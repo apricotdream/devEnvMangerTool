@@ -30,14 +30,24 @@
 
 ### 安装
 
-**方式一 · release 一键安装（推荐）**
+**方式一 · curl 一键安装（推荐）**
 
-从 [Gitee Releases](https://gitee.com/apricotdream/devEnvMangerTool/releases) 下载 `install.sh` 附件并执行（自动匹配你的架构 x64/arm64 与 libc gnu/musl）：
+一条命令直接拉取安装脚本并执行，自动匹配架构（x64/arm64）与 libc（gnu/musl，musl 静态包可在 gnu 上回退），无需手动下载：
 
 ```bash
-bash install.sh              # 安装最新版
-bash install.sh 0.2.4-beta   # 安装指定版本
+# 安装最新版（自动选最新含 Linux 附件的 release）
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash
+
+# 安装指定版本（把版本号作为参数传给脚本，注意 bash -s --）
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.4-beta
 ```
+
+> 也可从 [Gitee Releases](https://gitee.com/apricotdream/devEnvMangerTool/releases) 下载 `install.sh` 附件后本地执行（效果相同；当前目录若已有 `devenv-*.tar.gz` 会优先本地安装）：
+>
+> ```bash
+> bash install.sh              # 安装最新版
+> bash install.sh 0.2.4-beta   # 安装指定版本
+> ```
 
 **方式二 · 源码安装**（需 Rust 工具链；无系统 gcc 也能构建，用 musl 静态目标 + rust-lld 自包含链接）：
 
@@ -210,12 +220,12 @@ set GITEE_TOKEN=你的_gitee_private_token
 publish-release.cmd
 ```
 
-**Linux CLI 发布**：在 WSL2/Linux 上运行 `publish-release.sh`（同样读 `core/Cargo.toml` 版本号），构建 musl 静态 `devenv`，产出 `devenv-<target>-<tag>.tar.gz` + `install.sh` + `SHA256SUMS.txt` 上传到同一 Gitee release。用户安装：
+**Linux CLI 发布**：在 WSL2/Linux 上运行 `publish-release.sh`（同样读 `core/Cargo.toml` 版本号），构建 musl 静态 `devenv`，产出 `devenv-<target>-<tag>.tar.gz` + `install.sh` + `SHA256SUMS.txt` 并上传 Gitee release。注意 `.cmd` 与 `.sh` 都会各自建 tag/release，**完整发布（Win+Linux）时先跑 `publish-release.cmd` 建 release，再把 Linux 三件套传到同一个 release**（不要紧接着跑 `.sh`，否则因 tag/release 已存在而中止）。用户安装：
 
 ```bash
-# Linux / WSL：从 Gitee release 页下载 install.sh 附件后执行（自动匹配架构与最新版本）
-bash install.sh            # 安装最新版
-bash install.sh 0.2.4-beta # 安装指定版本
+# Linux / WSL：curl 一键安装（自动匹配架构 x64/arm64、libc gnu/musl 与最新版本）
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.4-beta  # 指定版本
 ```
 
 > 发版前需先把改动合并到 `main`（脚本基于 `origin/main` 打 tag）。版本号在 `core/Cargo.toml`、`src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 三处同步递增；tag 命名为 `v<版本号>`（如 `v0.2.1-beta`），已存在的 tag 会被脚本拒绝。
