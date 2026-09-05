@@ -40,16 +40,15 @@ for pat in "devenv-$TARGET-*.tar.gz" "devenv-$ARCH-unknown-linux-musl-*.tar.gz" 
 done
 
 # 附件选择：精确 target → musl 静态回退 → 任意 linux tarball
+# 直接 grep 出文件名本身（不含 "name":" 包装），免去引号剥离，避免 JSON 包裹污染下载 URL。
 pick_asset() {
   local json="$1" name pat
   for pat in \
-    "\"name\":\"devenv-$TARGET-[^\"]*\.tar\.gz\"" \
-    "\"name\":\"devenv-$ARCH-unknown-linux-musl-[^\"]*\.tar\.gz\"" \
-    "\"name\":\"devenv-[^\"]*unknown-linux-[^\"]*\.tar\.gz\""; do
+    "devenv-$TARGET-[^\"]*\.tar\.gz" \
+    "devenv-$ARCH-unknown-linux-musl-[^\"]*\.tar\.gz" \
+    "devenv-[^\"]*unknown-linux-[^\"]*\.tar\.gz"; do
     name="$(echo "$json" | grep -o "$pat" | head -1 || true)"
     if [[ -n "$name" ]]; then
-      name="${name#\\\"name\\\":\\\"}"   # 去掉 "name":"
-      name="${name%\\\"}"                # 去掉尾部括引号
       echo "$name"
       return 0
     fi

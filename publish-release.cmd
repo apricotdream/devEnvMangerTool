@@ -122,6 +122,20 @@ popd
 echo [OK] installer build done.
 
 REM -----------------------------------------------------
+REM   3b. Build the CLI binary (devenv.exe) from the workspace core.
+REM   Workspace split: the devenv bin lives in devenv-core, NOT in src-tauri,
+REM   so building src-tauri alone no longer emits target\release\devenv.exe.
+REM   Run from the workspace root -> lands in %~dp0target\release\devenv.exe.
+REM -----------------------------------------------------
+echo [3b/6] cargo build CLI devenv.exe (devenv-core) ...
+cargo build -p devenv-core --bin devenv --release
+if errorlevel 1 (
+    echo [ERROR] CLI build failed.
+    exit /b 1
+)
+echo [OK] CLI build done.
+
+REM -----------------------------------------------------
 REM   4. Collect artifacts into dist\
 REM -----------------------------------------------------
 echo [4/6] Collecting artifacts ...
