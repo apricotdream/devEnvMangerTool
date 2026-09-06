@@ -726,6 +726,28 @@ fn run_bun_action(action: BunAction) {
             println!("  版本: {}", info.version.as_deref().unwrap_or("-"));
             println!("  路径: {}", info.bin_path.as_deref().unwrap_or("-"));
             println!("  数据目录: {}", info.data_dir.as_deref().unwrap_or("-"));
+
+            // WSL 下：shell 里的 bun 可能是 Windows 版透过 interop 过来的（跨边界、读 Windows 证书库）。
+            if let Some(ip) = api::bun_interop_shadow() {
+                println!();
+                println!("⚠  检测到当前 shell 的 bun 是 WSL interop 过来的 Windows 版：");
+                println!("    {}", ip);
+                println!("    它跑在 Windows 侧：写 node_modules 是 Windows 进程跨边界（慢、权限/换行容易出问题），");
+                println!("    且使用 Windows 证书库，信任不到 WSL 里配置的私有 CA。");
+                println!("    工具未托管 Linux 原生 bun，`devenv node bun install` 可解决。");
+                if !info.installed {
+                    match pick("是否安装 Linux 原生 bun？", &["安装 Linux 原生 bun", "暂不处理"], |s| s.to_string()) {
+                        Some(opt) if *opt == "安装 Linux 原生 bun" => {
+                            println!("安装 bun latest ...");
+                            match api::install_bun(None, |stage| println!("  [{}]", stage)) {
+                                Ok(msg) => println!("✓ {}", msg),
+                                Err(e) => fail(format!("安装失败: {}", e)),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         BunAction::Install { version } => {
             let version = match version {

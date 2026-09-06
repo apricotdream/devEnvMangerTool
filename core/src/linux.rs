@@ -157,6 +157,69 @@ pub fn which_first(names: &[&str]) -> Option<PathBuf> {
     names.iter().find_map(|n| find_in_path(n))
 }
 
+// ---------------------------------------------------------------------------
+// WSL interop 探测：shell 中的工具链可能是 Windows 版透过 interop 过来的
+// （/mnt/<盘>/.../*.exe），与本工具管理的 Linux 原生工具链是两回事。
+// ---------------------------------------------------------------------------
+
+/// 是否运行在 WSL 下（用于识别 Windows interop 工具链，避免跨边界接管）。
+pub fn is_wsl() -> bool {
+    // WSL1/WSL2 内核的 osrelease 都带 "microsoft" 标志
+    if let Ok(rel) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        if rel.to_lowercase().contains("microsoft") {
+            return true;
+        }
+    }
+    // WSL 注入的环境变量（需要 WSL interop 支持的发行版会设置 WSL_INTEROP）
+    if std::env::var_os("WSL_DISTRO_NAME").map_or(false, |v| !v.is_empty()) {
+        return true;
+    }
+    if std::env::var_os("WSL_INTEROP").map_or(false, |v| !v.is_empty()) {
+        return true;
+    }
+    false
+}
+
+/// 判定路径是否为 WSL 借助 interop 暴露的 Windows 可执行文件：
+/// 位于 `/mnt/<盘>/...` 且以 `.exe`/`.cmd` 结尾。
+fn is_windows_interop_path(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.starts_with("/mnt/") && (s.ends_with(".exe") || s.ends_with(".cmd"))
+}
+
+/// 模拟 shell 的 PATH 解析（含 WSL 对 Windows 可执行文件 `.exe`/`.cmd` 的追加），
+/// 返回 shell 里实际会命中的 `name` 路径。用于探测 interop shadowing。
+fn shell_which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var("PATH").ok()?;
+    for dir in std::env::split_paths(&path) {
+        for cand in [
+            dir.join(name),
+            dir.join(format!("{name}.exe")),
+            dir.join(format!("{name}.cmd")),
+        ] {
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// WSL 下探测 `name` 是否被 Windows 版（interop）shadowing：shell 里能命中 `bun`，
+/// 但那是 Windows 二进制（`/mnt/.../*.exe`）。返回该路径即视为 interop。
+/// 非 WSL、或无 shadow、或命中 Linux 原生二进制时返回 None。
+pub fn interop_shadow_bin(name: &str) -> Option<String> {
+    if !is_wsl() {
+        return None;
+    }
+    let hit = shell_which(name)?;
+    if is_windows_interop_path(&hit) {
+        Some(hit.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
 fn run_cmd_out(program: &str, args: &[&str]) -> (String, String) {
     match crate::new_cmd(program).args(args).output() {
         Ok(out) => (

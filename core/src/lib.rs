@@ -4085,6 +4085,16 @@ pub mod api {
                 data_dir: None,
             })
     }
+    /// 检测 shell 中的 bun 是否为 WSL interop 过来的 Windows 二进制。
+    /// Linux/WSL 返回 interop 路径（被占用）；非 Linux 或无 shadow 返回 None。
+    #[cfg(target_os = "linux")]
+    pub fn bun_interop_shadow() -> Option<String> {
+        crate::linux::interop_shadow_bin("bun")
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn bun_interop_shadow() -> Option<String> {
+        None
+    }
     /// 安装/升级 bun。`version` 为 None 时安装最新版。
     #[cfg(target_os = "linux")]
     pub fn install_bun(version: Option<String>, emit: impl Fn(&str)) -> Result<String, String> {
