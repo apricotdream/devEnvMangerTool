@@ -110,7 +110,7 @@ devenv git sync <仓库目录>          # git pull --ff-only
 | 镜像源 | 切换 npm registry（官方 / npmmirror / 自定义），测试连接（含自签名 HTTPS；内网源自动跳过 schannel 吊销检查） |
 | Node 版本 | 安装/切换/卸载版本（每大版本取最新），安装后自动加入用户 PATH，nvm 检测与守卫，卸载 nvm 引导 |
 | 上传登录 | 管理 npm registry 账号（token / basic），多账号切换，whoami 认证验证；新增账号 registry 留空即默认公网 npmjs；**自动扫描全局 `~/.npmrc` 中已有的外部账号**（npm login / 其它工具写入），实时检测连通性，一键「纳入管理」 |
-| 包管理器 | 管理 pnpm / yarn / cnpm / pm2 / bun：安装/切换版本、**卸载（连带清理数据目录）**、**切换数据目录（robocopy 迁移数据并改指向：pm2 `PM2_HOME`、bun `BUN_INSTALL`、yarn `YARN_CACHE_FOLDER`、pnpm store-dir）**，显示安装位置与实际数据目录 |
+| 包管理器 | 管理 pnpm / yarn / cnpm / pm2 / bun：安装/切换版本、**卸载（连带清理数据目录）**、**切换数据目录（robocopy 迁移数据并改指向：pm2 `PM2_HOME`、bun `BUN_INSTALL`、yarn `YARN_CACHE_FOLDER`、pnpm store-dir）**，显示安装位置与实际数据目录；bun 另支持**「装到 WSL」目标**（`devenv node bun install-wsl` / GUI「装到 WSL」：把 Linux 版 bun 装进所选 WSL 发行版的 `~/.bun/bin`，走 npmmirror 镜像） |
 | 项目管理 | 打开项目目录，解析 `.nvmrc` / `package.json` / 项目 `.npmrc` 要求，一键应用 Node 版本与包管理器 |
 | 发布 | 扫描 `packages/` 下可发布包（支持 monorepo），发布源默认提供「公网 npmjs」选项，点发布时自动扫描 `~/.npmrc` 凭据，按账号发布到指定 registry，发布前可选构建 |
 | 证书信任 | 探测自签名 HTTPS 证书，一键信任并写入 Node extra CA，管理已信任证书 |
@@ -148,6 +148,7 @@ devenv node project [dir]           # 项目管理：解析 .nvmrc/package.json 
 devenv node test [url]              # npm 镜像测速（省略 url 测当前源 + 常用源）
 devenv node bun status              # bun 运行时状态
 devenv node bun install [ver]       # 安装/升级 bun（独立二进制，npmmirror zip；省略 ver 装最新）
+devenv node bun install-wsl [ver]   # 把 Linux 版 bun 装进所选 WSL 发行版（Windows 侧，装进其 ~/.bun/bin）
 devenv node bun upgrade             # 升级 bun 到最新
 devenv node bun uninstall           # 卸载托管 bun
 devenv node accounts                # 扫描 ~/.npmrc 已有发布凭据，纳入管理 / 切换
@@ -188,7 +189,7 @@ devenv git sync <repo>              # 同步仓库
 >
 > **Git 安装 / 账号写入在 Linux 的差异**：Git 由系统包管理器托管（强依赖系统库、需 root），`devenv git install` 在 Linux 上只打印对应的 `sudo apt/dnf/… install` 命令，不代为执行；账号增删改、SSH 密钥生成、身份切换等与 Windows 完全一致（写 `~/.ssh/config` + `~/.ssh/id_rsa_<别名>`）。
 >
-> **Linux 上的 Node/Python 对齐项**：`node project` / `python project` 解析项目版本声明并自动装切；`node test` / `python test` 用 curl 探测镜像延迟。**bun** 在 Linux 由本工具托管（npmmirror 下载 zip → `unzip` 解压 → 软链进 `~/.local/bin`，需系统已装 `unzip`，缺失时给出 `sudo apt/dnf/… install unzip` 提示），独立于 node。**Python 包管理器**（uv/poetry/pipenv）通过 `pip install --user` 装到**共享 `~/.local/bin`（真实文件）**，切换/卸载 Python 版本后仍然可用。**npm 发布**复用 `~/.npmrc` 已有凭据（先 `npm login`，再 `devenv node accounts` 纳入管理），发布前**强制 `--dry-run` 预检**、确认后才真发（`--yes` 跳过确认）。
+> **Linux 上的 Node/Python 对齐项**：`node project` / `python project` 解析项目版本声明并自动装切；`node test` / `python test` 用 curl 探测镜像延迟。**bun** 在 Linux/WSL 由本工具托管（npmmirror 下载 zip → `unzip` 解压 → 装入 **`~/.bun/bin/bun`**，需系统已装 `unzip`，缺失时给出 `sudo apt/dnf/… install unzip` 提示），独立于 node；Windows 侧可 `devenv node bun install-wsl` / GUI「装到 WSL」，把 Linux 版 bun 装进所选 WSL 发行版。**Python 包管理器**（uv/poetry/pipenv）通过 `pip install --user` 装到**共享 `~/.local/bin`（真实文件）**，切换/卸载 Python 版本后仍然可用。**npm 发布**复用 `~/.npmrc` 已有凭据（先 `npm login`，再 `devenv node accounts` 纳入管理），发布前**强制 `--dry-run` 预检**、确认后才真发（`--yes` 跳过确认）。
 
 ## 技术栈
 
@@ -277,7 +278,7 @@ curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh |
 - **Python 项目管理**：`devenv python project [dir]` 解析 `.python-version` / `pyproject.toml`（requires-python、tool）/ `runtime.txt` / `Pipfile`，一键装切 Python。
 - **镜像测速**：`devenv node test [url]`（npm registry）、`devenv python test [url]`（PyPI `simple/`），探测可达性、HTTP 状态与延迟；省略 URL 测当前源 + 常用源。
 - **Python 包管理器**：`devenv python pkg list|install`，管理 pip / uv / poetry / pipenv / conda；uv/poetry/pipenv 通过 `pip install --user` 装到**共享 `~/.local/bin`（真实文件）**，切换/卸载 Python 版本后仍可用。
-- **bun 托管**：`devenv node bun status|install|upgrade|uninstall`——独立二进制（不依赖 node），从 npmmirror 下载 zip、`unzip` 解压后软链进 `~/.local/bin`（缺 unzip 给出安装提示），gnu/musl × x64/arm64 自动匹配。
+- **bun 托管**：`devenv node bun status|install|upgrade|uninstall`——独立二进制（不依赖 node），从 npmmirror 下载 zip、`unzip` 解压后装入官方布局 `~/.bun/bin/bun` 并幂等注入 PATH（缺 unzip 给出安装提示），gnu/musl × x64/arm64 自动匹配；安装/卸载自动清理旧版（≤v0.2.5）`~/.local/bin/bun` 托管软链，避免其遮盖新布局。
 - **npm 发布账号（CLI）**：`devenv node accounts` 扫描 `~/.npmrc` 已有凭据（npm login 写入）、检测连通性，一键「纳入管理」并切换激活（不提供粘贴 token 向导）。
 - **npm 包发布（CLI）**：`devenv node publish` 扫描根包与 `packages/`（monorepo），**发布前强制 `--dry-run` 预检**，y/N 确认后才真发（`--yes` 跳过确认），遇 2FA 提示输入 OTP。
 - 共享层去 Windows 硬编码（`npm`/`curl`/`/dev/null`/证书与账号路径跨平台），Windows 桌面端行为不变。

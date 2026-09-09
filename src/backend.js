@@ -491,6 +491,18 @@
       return `${name} 数据目录已切换到 ${target}（模拟）`;
     },
 
+    async listWslDistros() {
+      if (IS_TAURI) return _invoke("list_wsl_distros");
+      await _delay(150);
+      return ["Ubuntu", "Ubuntu-24.04"];
+    },
+
+    async installBunInWsl(distro, version) {
+      if (IS_TAURI) return _invoke("install_bun_in_wsl", { distro, version });
+      await _delay(900);
+      return `bun 已安装到 WSL ${distro}（模拟）`;
+    },
+
     async pickFolder(title = "选择目录") {
       if (IS_TAURI && window.__TAURI__.dialog) {
         const sel = await window.__TAURI__.dialog.open({ directory: true, title });

@@ -163,6 +163,8 @@ enum BunAction {
     Status,
     /// 安装 / 升级 bun（参数可填版本号，省略装最新）
     Install { version: Option<String> },
+    /// 安装到 WSL 发行版（把 Linux 版 bun 装进所选发行版）
+    InstallWsl { version: Option<String> },
     /// 升级 bun 到最新
     Upgrade,
     /// 卸载托管 bun
@@ -690,10 +692,11 @@ fn run_node_test(url: Option<String>) {
     }
 }
 
-fn bun_menu() -> [MenuItem; 5] {
+fn bun_menu() -> [MenuItem; 6] {
     [
         ("status", "查看 bun 状态"),
         ("install", "安装 / 升级 bun（可指定版本）"),
+        ("install-wsl", "安装到 WSL 发行版"),
         ("upgrade", "升级 bun 到最新"),
         ("uninstall", "卸载托管 bun"),
         ("back", "返回上一级"),
@@ -707,6 +710,7 @@ fn run_bun(action: Option<BunAction>) {
             let a = match key {
                 "status" => BunAction::Status,
                 "install" => BunAction::Install { version: None },
+                "install-wsl" => BunAction::InstallWsl { version: None },
                 "upgrade" => BunAction::Upgrade,
                 "uninstall" => BunAction::Uninstall,
                 _ => return,
@@ -761,6 +765,23 @@ fn run_bun_action(action: BunAction) {
             match api::install_bun(version, |stage| println!("  [{}]", stage)) {
                 Ok(msg) => println!("✓ {}", msg),
                 Err(e) => fail(format!("安装失败: {}", e)),
+            }
+        }
+        BunAction::InstallWsl { version } => {
+            let distros = api::list_wsl_distros();
+            if distros.is_empty() {
+                println!("未检测到 WSL 发行版（或当前已在 WSL 内，可直接用 install）");
+                return;
+            }
+            let Some(d) = pick("选择 WSL 发行版", &distros, |s| s.clone()) else { return; };
+            let version = version.or_else(|| {
+                prompt_line("bun 版本（直接回车 = 最新）: ")
+                    .filter(|s| !s.is_empty())
+            });
+            println!("安装 bun {} 到发行版 {} ...", version.as_deref().unwrap_or("latest"), d);
+            match api::install_bun_in_wsl(d.clone(), version) {
+                Ok(msg) => println!("✓ {msg} （发行版 {d}）"),
+                Err(e) => fail(format!("安装失败: {e}")),
             }
         }
         BunAction::Upgrade => match api::upgrade_bun() {

@@ -1640,6 +1640,7 @@
         `</div>` +
         `<div class="pkg-actions">` +
         `<button class="btn btn-mini btn-ghost" data-act="install" data-name="${m.name}">安装/切换</button>` +
+        (m.name === "bun" ? `<button class="btn btn-mini btn-ghost" data-act="installwsl" data-name="bun">装到 WSL</button>` : "") +
         (m.installed && m.dataDir ? `<button class="btn btn-mini btn-ghost" data-act="opendir" data-dir="${m.dataDir}">数据目录</button>` : "") +
         (canSwitch ? `<button class="btn btn-mini btn-ghost" data-act="datadir" data-name="${m.name}" data-dir="${m.dataDir || ""}">切换目录</button>` : "") +
         (m.installed ? `<button class="btn btn-mini btn-ghost btn-danger" data-act="uninstall" data-name="${m.name}">卸载</button>` : "") +
@@ -1654,6 +1655,7 @@
     const act = btn.dataset.act;
     const name = btn.dataset.name;
     if (act === "install") installPkg(name);
+    else if (act === "installwsl") installBunInWsl(name);
     else if (act === "opendir") {
       window.Backend.gitOpenInManager(btn.dataset.dir, false).catch(() => {});
     } else if (act === "uninstall") uninstallPkg(name);
@@ -1723,6 +1725,49 @@
         try {
           const res = await withFullscreenLoading(`安装 ${name} 中…`, async () =>
             window.Backend.installPkgManager(name, version),
+          );
+          log("info", res);
+        } catch (err) {
+          log("err", `安装失败: ${err.message || err}`);
+        } finally {
+          loadPkgManagers();
+        }
+      },
+    });
+  }
+
+  async function installBunInWsl(name) {
+    let distros = [];
+    try {
+      distros = await window.Backend.listWslDistros();
+    } catch (e) {
+      log("err", `列举 WSL 发行版失败: ${e.message}`);
+      return;
+    }
+    if (!distros.length) {
+      log("warn", "未检测到 WSL 发行版（或当前已在 WSL 内，可直接用「安装/切换」）");
+      return;
+    }
+    openFormModal({
+      title: `安装 bun 到 WSL`,
+      hint: `把 Linux 版 bun（ELF）装进所选 WSL 发行版的 ~/.bun/bin，走 npmmirror 镜像。`,
+      fields: [
+        {
+          key: "distro", label: "WSL 发行版", type: "select", defaultValue: distros[0],
+          options: distros.map((d) => ({ value: d, label: d })),
+        },
+        {
+          key: "version", label: "版本号", type: "text", placeholder: "留空 = 最新",
+          pattern: /^v?\d+(\.\d+){1,2}(-[\w.]+)?$/, patternMsg: "版本号格式如 1.4.0 或 v1.4.0",
+        },
+      ],
+      submitText: "安装",
+      onSubmit: async (values) => {
+        const version = values.version.trim() || null;
+        closeModal();
+        try {
+          const res = await withFullscreenLoading(`安装 bun 到 WSL ${values.distro} 中…`, async () =>
+            window.Backend.installBunInWsl(values.distro, version),
           );
           log("info", res);
         } catch (err) {

@@ -2483,6 +2483,140 @@ fn install_pkg_manager(name: String, version: Option<String>) -> Result<String, 
     }
 }
 
+// ---------------------------------------------------------------------------
+// WSL 目标：把 Linux 版 bun（ELF）装进指定 WSL 发行版内部 ~/.bun/bin（官方布局）。
+// 下载走 npmmirror 镜像（GitHub 直连在网络受限环境会 TLS 中断）。
+// ---------------------------------------------------------------------------
+
+/// 从 npmmirror bun 索引解析最高 `bun-v<x.y.z>`（跨平台，Linux/WSL 与 Windows 侧共用）。
+pub fn latest_bun_version() -> Option<String> {
+    let html = run_cmd(
+        curl_bin(),
+        &["-s", "-m", "15", "https://registry.npmmirror.com/-/binary/bun/"],
+    )?;
+    let re = regex::Regex::new(r"bun-v(\d+)\.(\d+)\.(\d+)/").ok()?;
+    let mut best: Option<(i32, i32, i32)> = None;
+    for cap in re.captures_iter(&html) {
+        let v = (
+            cap[1].parse().unwrap_or(0),
+            cap[2].parse().unwrap_or(0),
+            cap[3].parse().unwrap_or(0),
+        );
+        if best.map(|b| v > b).unwrap_or(true) {
+            best = Some(v);
+        }
+    }
+    best.map(|(a, b, c)| format!("{a}.{b}.{c}"))
+}
+
+/// 生成「在 Linux/WSL（bash/csh 外）内把 ELF bun 装到 ~/.bun/bin」的 POSIX 脚本。
+/// Windows 侧通过 `wsl.exe -d <distro> -- bash -lc '<script>'` 执行；Linux/WSL 侧可直接跑。
+/// `version` 应是纯版本号（不带 `v` 前缀）；终点与工具在 WSL 内的 Rust 安装逻辑一致。
+pub fn bun_linux_install_script(version: &str) -> String {
+    r#"set -e
+ver='_VER_'
+case "$(uname -m)" in
+  x86_64) a=x64 ;;
+  aarch64|arm64) a=aarch64 ;;
+  *) echo "bun 仅支持 x86_64 / arm64 Linux 架构"; exit 1 ;;
+esac
+url="https://registry.npmmirror.com/-/binary/bun/bun-v${ver}/bun-linux-${a}.zip"
+bun_dir="${BUN_INSTALL:-$HOME/.bun}"
+bin="$bun_dir/bin"
+mkdir -p "$bin"
+if ! command -v unzip >/dev/null 2>&1; then
+  echo "解压 bun 需要 unzip，请先安装（如 sudo apt-get install -y unzip）"; exit 1
+fi
+tmp="$(mktemp -d)"
+echo "downloading"
+curl -f -L -s -o "$tmp/bun.zip" "$url"
+echo "extracting"
+unzip -o -q "$tmp/bun.zip" -d "$tmp/x"
+bun_file="$(find "$tmp/x" -type f -name bun 2>/dev/null | head -1)"
+if [ -z "$bun_file" ]; then echo "解压后未找到 bun 二进制"; rm -rf "$tmp"; exit 1; fi
+install -m755 "$bun_file" "$bin/bun"
+rm -rf "$tmp"
+legacy="$HOME/.local/bin/bun"
+if [ -L "$legacy" ] && readlink "$legacy" | grep -q '/devenv/bun/'; then
+  rm -f "$legacy"
+  echo "已清理旧布局软链 $legacy"
+fi
+in_path=0
+IFS=:; for p in $PATH; do [ "$p" = "$bin" ] && in_path=1; done; unset IFS
+if [ "$in_path" = "0" ]; then
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [ -f "$rc" ] && ! grep -qF "$bin" "$rc"; then
+      printf '\n# >>> devenv bun >>>\nexport PATH="%s:$PATH"\nexport BUN_INSTALL="${BUN_INSTALL:-%s}"\n# <<< devenv bun <<<\n' "$bin" "$bun_dir" >> "$rc"
+      break
+    fi
+  done
+fi
+echo "已安装 $bin/bun"
+"$bin/bun" --version || true
+"#
+    .replace("_VER_", version)
+}
+
+/// 列出可用的 WSL 发行版（Windows 侧；`wsl.exe -l -q`；Linux 内返回空）。
+#[cfg_attr(feature = "gui", tauri::command)]
+fn list_wsl_distros() -> Vec<String> {
+    list_wsl_distros_impl()
+}
+#[cfg(target_os = "linux")]
+fn list_wsl_distros_impl() -> Vec<String> {
+    Vec::new()
+}
+#[cfg(not(target_os = "linux"))]
+fn list_wsl_distros_impl() -> Vec<String> {
+    // `wsl.exe -l -q` 在 Windows 非 TTY 下输出 UTF-16LE（每字符后带 \0），需去除空字节再解析。
+    let (out, _err) = run_cmd_both("wsl.exe", &["-l", "-q"]);
+    out.replace('\0', "")
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.contains("(Default)")
+                && !l.contains("Windows Subsystem")
+                && !l.starts_with('*')
+        })
+        .collect()
+}
+
+/// 把 Linux 版 bun 装进指定 WSL 发行版的 `~/.bun/bin`（Windows 侧，跨 interop；
+/// Linux 内空 / "current" 时直接本地安装）。
+#[cfg_attr(feature = "gui", tauri::command)]
+fn install_bun_in_wsl(distro: String, version: Option<String>) -> Result<String, String> {
+    install_bun_in_wsl_impl(distro, version)
+}
+#[cfg(target_os = "linux")]
+fn install_bun_in_wsl_impl(distro: String, version: Option<String>) -> Result<String, String> {
+    if distro.is_empty() || distro == "current" {
+        crate::linux::install_bun(version.as_deref(), |_| {})
+    } else {
+        Err("请在目标发行版内直接运行 devenv node bun install，或改用 --wsl <distro> 从 Windows 侧安装".to_string())
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn install_bun_in_wsl_impl(distro: String, version: Option<String>) -> Result<String, String> {
+    let ver = match version {
+        Some(v) => v.trim().trim_start_matches('v').to_string(),
+        None => latest_bun_version().ok_or("无法解析 bun 最新版本（网络问题）")?,
+    };
+    // 脚本经 base64 承载、用单行管道执行，避免多行脚本在 wsl.exe 的
+    // Windows 命令行→Linux argv 转换中被拆分/截断（换行、引号、空格）。
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bun_linux_install_script(&ver).as_bytes());
+    let inner = format!("printf '%s' '{}' | base64 -d | bash", b64);
+    let out = new_cmd("wsl.exe")
+        .args(["-d", distro.as_str(), "--", "bash", "-lc", inner.as_str()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!("安装失败：{}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
 /// 卸载包管理器并连带删除其数据/缓存目录。
 /// pnpm/yarn/cnpm/pm2 走 `npm uninstall -g`；bun 删 ~/.bun 并清 PATH/BUN_INSTALL。
 #[cfg_attr(feature = "gui", tauri::command)]
@@ -4120,6 +4254,15 @@ pub mod api {
     pub fn uninstall_bun() -> Result<String, String> {
         crate::uninstall_pkg_manager("bun".to_string())
     }
+    /// 列出可用 WSL 发行版（Windows 侧；Linux 内返回空，无需跨装）。
+    pub fn list_wsl_distros() -> Vec<String> {
+        crate::list_wsl_distros()
+    }
+    /// 把 Linux 版 bun 装进指定 WSL 发行版的 `~/.bun/bin`（Windows 侧）。
+    /// Linux 内空 / "current" 时直接本地安装。
+    pub fn install_bun_in_wsl(distro: String, version: Option<String>) -> Result<String, String> {
+        crate::install_bun_in_wsl(distro, version)
+    }
 
     // ---- npm 发布账号（复用 ~/.npmrc 已有凭据；.npmrc/账号路径已跨平台）----
     pub fn scan_npmrc_credentials() -> Vec<NpmrcCredential> {
@@ -4254,6 +4397,8 @@ pub fn app_builder() -> tauri::Builder<tauri::Wry> {
             install_pkg_manager,
             uninstall_pkg_manager,
             switch_pkg_data_dir,
+            list_wsl_distros,
+            install_bun_in_wsl,
             inspect_project,
             apply_project,
             read_project_file,

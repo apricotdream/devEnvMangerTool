@@ -925,7 +925,8 @@ pub fn dangling_symlinks() -> Vec<String> {
 // bun：独立单二进制运行时（npmmirror zip，不依赖 node）
 // ---------------------------------------------------------------------------
 
-/// bun 托管安装根：`$XDG_DATA_HOME/devenv/bun/<version>/bun`。
+/// bun 下载/解压暂存根（v0.2.5 前的托管布局，现仅作升级兼容与旧软链清理的判定基准）：
+/// `$XDG_DATA_HOME/devenv/bun/<version>/`。
 fn bun_install_root() -> PathBuf {
     install_root().join("bun")
 }
@@ -994,7 +995,8 @@ fn bun_asset_url(version: &str) -> Result<String, String> {
 }
 
 pub fn bun_info() -> PkgManagerInfo {
-    let bin = find_in_path("bun");
+    let managed = bun_data_dir().join("bin").join("bun");
+    let bin = if managed.is_file() { Some(managed) } else { find_in_path("bun") };
     let bin_path = bin.as_ref().map(|p| p.to_string_lossy().to_string());
     let mut info = PkgManagerInfo {
         name: "bun".to_string(),
@@ -1012,7 +1014,7 @@ pub fn bun_info() -> PkgManagerInfo {
 }
 
 /// 安装/升级 bun。`version` 为 None 时装最新版。zip 扁平单文件 `bun`，
-/// 直接软链 `~/.local/bin/bun → <版本目录>/bun`（不走 link_version_bins，它硬编码 bin/）。
+/// 装入官方布局 `~/.bun/bin/bun`（迁移自 v0.2.5 的 `~/.local/bin` 软链，旧链安装时自动清理）。
 /// 在版本目录里定位 bun 二进制：zip 可能扁平（`bun`）或带顶层目录（`bun-linux-x64/bun`）。
 fn find_bun_bin(dir: &Path) -> Option<PathBuf> {
     let direct = dir.join("bun");
@@ -1039,8 +1041,8 @@ pub fn install_bun(version: Option<&str>, emit: impl Fn(&str)) -> Result<String,
     let target = root.join(&ver);
 
     if let Some(existing) = find_bun_bin(&target) {
-        link_bun(&existing)?;
-        return Ok(format!("bun {ver} 已安装，已切换软链"));
+        install_into_bun_bin(&existing)?;
+        return Ok(format!("bun {ver} 已安装，已更新 ~/.bun/bin/bun"));
     }
 
     // unzip 是解压 zip 的前提（GNU tar 读不了 zip）
@@ -1081,32 +1083,85 @@ pub fn install_bun(version: Option<&str>, emit: impl Fn(&str)) -> Result<String,
     let bun_bin = find_bun_bin(&target).ok_or("解压后未找到 bun 可执行文件")?;
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&bun_bin, std::fs::Permissions::from_mode(0o755));
-    link_bun(&bun_bin)?;
+    install_into_bun_bin(&bun_bin)?;
     Ok(format!("bun {ver} 安装完成"))
 }
 
-/// 软链 `~/.local/bin/bun` → 托管 bun 二进制（覆盖旧软链，不碰用户真实文件）。
-fn link_bun(bun_bin: &Path) -> Result<(), String> {
-    let link_dir = local_bin();
-    std::fs::create_dir_all(&link_dir).map_err(|e| format!("创建 {} 失败：{e}", link_dir.display()))?;
-    let dst = link_dir.join("bun");
-    match std::fs::symlink_metadata(&dst) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(&dst);
-        }
-        Ok(_) => return Err("~/.local/bin/bun 已存在且不是软链，拒绝覆盖".to_string()),
-        Err(_) => {}
-    }
-    std::os::unix::fs::symlink(bun_bin, &dst)
-        .map_err(|e| format!("创建软链 {} -> {} 失败：{e}", dst.display(), bun_bin.display()))?;
-    ensure_local_bin_in_path();
+/// 把解压出的 bun 二进制装入官方布局 `~/.bun/bin/bun`（或 `$BUN_INSTALL/bin/bun`），
+/// 设置可执行位并把 `~/.bun/bin` 注入 PATH rc。
+fn install_into_bun_bin(bun_bin: &Path) -> Result<(), String> {
+    let bin_dir = bun_data_dir().join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("创建 {} 失败：{e}", bin_dir.display()))?;
+    let dst = bin_dir.join("bun");
+    let _ = std::fs::remove_file(&dst); // 覆盖旧版（升级）
+    std::fs::copy(bun_bin, &dst).map_err(|e| format!("写入 {} 失败：{e}", dst.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
+    remove_legacy_bun_symlink();
+    ensure_bun_bin_in_path();
     Ok(())
 }
 
+/// 迁移防护（v0.2.5 → 0.2.6）：旧布局用 `~/.local/bin/bun` 软链指向 `$XDG_DATA_HOME/devenv/bun/...`，
+/// 且旧 `# >>> devenv >>>` PATH 段常排在新 `~/.bun/bin` 之前，会遮盖官方布局。安装/卸载时删除这类
+/// 旧软链（仅当链接目标指向 devenv 托管 bun 目录；指向他处的手建链接一律不动，悬空旧链也清理）。
+fn remove_legacy_bun_symlink() {
+    let legacy = home_dir().join(".local").join("bin").join("bun");
+    match std::fs::symlink_metadata(&legacy) {
+        Ok(m) if m.file_type().is_symlink() => {}
+        _ => return,
+    }
+    let target = std::fs::read_link(&legacy).unwrap_or_default();
+    let t = target.to_string_lossy().replace('\\', "/");
+    let root = bun_install_root().to_string_lossy().replace('\\', "/");
+    if t.starts_with(&root) || t.contains("/devenv/bun/") {
+        let _ = std::fs::remove_file(&legacy);
+    }
+}
+
+const BUN_RC_MARKER: &str = "# >>> devenv bun >>>";
+const BUN_RC_END: &str = "# <<< devenv bun <<<";
+
+/// 若 `~/.bun/bin`（或 `$BUN_INSTALL/bin`）不在 PATH，注入到已存在的 bash/zsh rc（幂等）。
+fn ensure_bun_bin_in_path() {
+    let bin_dir = bun_data_dir().join("bin");
+    let has = std::env::var("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d == bin_dir))
+        .unwrap_or(false);
+    if has {
+        return;
+    }
+    let home = home_dir();
+    let line = "export PATH=\"${BUN_INSTALL:-$HOME/.bun}/bin:$PATH\"";
+    for rc_name in [".bashrc", ".zshrc"] {
+        let rc = home.join(rc_name);
+        if rc.exists() {
+            let text = std::fs::read_to_string(&rc).unwrap_or_default();
+            if text.contains(BUN_RC_MARKER) {
+                return; // 幂等
+            }
+            let mut out = text.trim_end().to_string();
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(BUN_RC_MARKER);
+            out.push('\n');
+            out.push_str(line);
+            out.push('\n');
+            out.push_str(BUN_RC_END);
+            out.push('\n');
+            let _ = std::fs::write(&rc, out);
+            return;
+        }
+    }
+}
+
 pub fn upgrade_bun() -> Result<String, String> {
-    // 优先用 bun 自带升级；不可用（未装/旧版）则重下最新版覆盖。
-    if find_in_path("bun").is_some() {
-        if let Some(out) = run_cmd("bun", &["upgrade"]) {
+    // 优先用已装 bun 自带升级；不可用（未装/旧版）则重下最新版覆盖。
+    let managed = bun_data_dir().join("bin").join("bun");
+    if managed.is_file() {
+        let bin = managed.to_string_lossy().to_string();
+        if let Some(out) = run_cmd(&bin, &["upgrade"]) {
             return Ok(format!("bun 自带升级已执行：{out}"));
         }
     }
@@ -1114,17 +1169,11 @@ pub fn upgrade_bun() -> Result<String, String> {
 }
 
 pub fn uninstall_bun() -> Result<String, String> {
-    let link = local_bin().join("bun");
-    if let Ok(meta) = std::fs::symlink_metadata(&link) {
-        if meta.file_type().is_symlink() {
-            let _ = std::fs::remove_file(&link);
-        }
-    }
-    let root = bun_install_root();
-    if root.exists() {
-        std::fs::remove_dir_all(&root).map_err(|e| format!("删除 {} 失败：{e}", root.display()))?;
-    }
-    Ok("已卸载托管 bun（软链与版本目录已清除；~/.bun 数据目录保留，如需可手动删除）".to_string())
+    let bin_dir = bun_data_dir().join("bin");
+    let _ = std::fs::remove_file(bin_dir.join("bun"));
+    let _ = std::fs::remove_dir(&bin_dir); // 空目录则一并删除
+    remove_legacy_bun_symlink(); // 旧布局 ~/.local/bin/bun 软链一并清理，避免卸载后残留悬空链接
+    Ok("已卸载 bun（已删除 ~/.bun/bin/bun；~/.bun 数据目录保留，如需可手动删除）".to_string())
 }
 
 // ---------------------------------------------------------------------------
