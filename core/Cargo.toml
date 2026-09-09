@@ -1,6 +1,6 @@
 [package]
 name = "devenv-core"
-version = "0.2.5-beta"
+version = "0.2.6-beta"
 description = "DevEnvManager 核心逻辑（跨平台，无 GUI 依赖）"
 authors = ["DevEnvManager"]
 edition = "2021"
