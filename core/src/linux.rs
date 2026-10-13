@@ -402,13 +402,48 @@ fn extract_rc_block<'a>(text: &'a str, marker: &str, end: &str) -> Option<(usize
     Some((line_start, line_end, inner))
 }
 
+/// 中断残留：start marker 存在但找不到配对 end marker（旧版末尾追加时进程被杀）。
+/// 旧版只往文件末尾追加，半成品块必然在 EOF 处——删除 marker 所在行到文件末尾。
+/// 返回删除后的新文本。
+fn strip_dangling_block(mut text: String, marker: &str) -> String {
+    if let Some(start) = text.find(marker) {
+        let line_start = text[..start].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        text.truncate(line_start);
+        // 截掉末尾多余空行，留一个换行收尾
+        while text.ends_with("\n\n") {
+            text.pop();
+        }
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// 同目录临时文件 + rename 原子替换，避免写到一半进程被杀/断电导致 rc 文件截断损坏。
+/// 临时名带 PID + 纳秒时间戳，.bashrc/.zshrc 并发写入也互不干扰。
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".devenv-rc-{}-{}.tmp", std::process::id(), nanos));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// 幂等写入一个 marker 包裹的 shell 块。
 ///
 /// - 块已存在且位于非交互 return 守卫之前：不动；
 /// - 块已存在但位于守卫之后（≤0.2.6 的旧布局，末尾追加）：整体搬到守卫之前；
 /// - 块不存在：插到守卫之前，无守卫则追加末尾。
 fn write_rc_block(path: &Path, marker: &str, end: &str, content: &[&str]) -> Result<bool, String> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut text = std::fs::read_to_string(path).unwrap_or_default();
+    // 上次写入被中断：有 start marker 却无配对 end（旧版追加到末尾时被杀），先摘除残留段
+    if text.contains(marker) && !text.contains(end) {
+        text = strip_dangling_block(text, marker);
+    }
     let block_lines: Vec<String>;
     let mut body = text.clone();
 
@@ -457,7 +492,7 @@ fn write_rc_block(path: &Path, marker: &str, end: &str, content: &[&str]) -> Res
         out
     };
 
-    std::fs::write(path, out).map_err(|e| format!("写入 {} 失败：{}", path.display(), e))?;
+    atomic_write(path, &out).map_err(|e| format!("写入 {} 失败：{}", path.display(), e))?;
     Ok(true)
 }
 
@@ -1698,6 +1733,31 @@ export PATH=\"/old:$PATH\"
         assert!(out.contains("/old"), "existing block content must be preserved");
         assert_eq!(out.matches(M).count(), 1, "block must not be duplicated");
         assert!(!out.contains("HISTCONTROL=ignoreboth\n# >>>"), "old block removed from tail");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn recovers_from_interrupted_trailing_write() {
+        // 模拟旧版追加时进程被杀：start marker 存在、无 end marker，残段在 EOF
+        let bashrc = "\
+# ~/.bashrc
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+HISTCONTROL=ignoreboth
+# >>> test >>>
+export PATH=\"/partial:$PATH\"
+";
+        let p = write_tmp("dangling", bashrc);
+        write_rc_block(&p, M, E, &[LINE]).unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(out.matches(M).count(), 1, "dangling fragment must be replaced, not duplicated");
+        assert!(out.contains(E), "new block must be complete");
+        assert!(!out.contains("/partial"), "fragment content removed");
+        assert!(out.find(M).unwrap() < out.find("case $-").unwrap());
+        assert!(out.contains("HISTCONTROL=ignoreboth"), "rest of file preserved");
         std::fs::remove_file(&p).ok();
     }
 

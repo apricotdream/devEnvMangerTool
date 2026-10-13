@@ -2544,11 +2544,51 @@ fi
 in_path=0
 IFS=:; for p in $PATH; do [ "$p" = "$bin" ] && in_path=1; done; unset IFS
 if [ "$in_path" = "0" ]; then
+  # PATH 块必须在 ~/.bashrc 顶部「非交互 shell return 守卫」之前，否则
+  # wsl -d dist -- cmd / IDE / CI 等非交互 shell 读不到（与 Rust 侧 write_rc_block 同义）。
+  rc_start='# >>> devenv bun >>>'
+  rc_end='# <<< devenv bun <<<'
+  # 所有改写都先写同目录临时文件再 mv 原子替换，防止写到一半被杀导致 rc 截断
+  atomic_replace() { # $1=目标文件 $2=临时文件
+    chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"
+    mv -f "$2" "$1"
+  }
   for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-    if [ -f "$rc" ] && ! grep -qF "$bin" "$rc"; then
-      printf '\n# >>> devenv bun >>>\nexport PATH="%s:$PATH"\nexport BUN_INSTALL="${BUN_INSTALL:-%s}"\n# <<< devenv bun <<<\n' "$bin" "$bun_dir" >> "$rc"
-      break
+    [ -f "$rc" ] || continue
+    if grep -qF "$rc_start" "$rc"; then
+      if grep -qF "$rc_end" "$rc"; then
+        sl=$(grep -nF "$rc_start" "$rc" | head -1 | cut -d: -f1)
+        gl=$(grep -nE '^case[[:space:]]+\$-[[:space:]]+in' "$rc" | head -1 | cut -d: -f1)
+        if [ -z "$gl" ] || [ "$sl" -lt "$gl" ]; then
+          break   # 无守卫（块在哪都行）或块已在守卫之前：幂等
+        fi
+        # 旧块在守卫之后：删除 start..end 整块（marker 含 #，不能用 sed 的 # 地址分隔符）
+        tmp="$(mktemp)"
+        awk -v s="$rc_start" -v e="$rc_end" '
+          index($0,s){skip=1}
+          skip && index($0,e){skip=0; next}
+          !skip{print}
+        ' "$rc" > "$tmp" && atomic_replace "$rc" "$tmp" || rm -f "$tmp"
+      else
+        # 上次写入中断的残留段（有 start 无 end，旧版追加到 EOF）：删 start 行到文件末尾
+        tmp="$(mktemp)"
+        awk -v s="$rc_start" 'index($0,s){exit} {print}' "$rc" > "$tmp" && atomic_replace "$rc" "$tmp" || rm -f "$tmp"
+      fi
     fi
+    block="$rc_start
+export PATH=\"$bin:\$PATH\"
+export BUN_INSTALL=\"\${BUN_INSTALL:-$bun_dir}\"
+$rc_end"
+    tmp="$(mktemp)"
+    if grep -qE '^case[[:space:]]+\$-[[:space:]]+in' "$rc"; then
+      awk -v b="$block" '
+        !ins && /^case[[:space:]]+\$-[[:space:]]+in/ { print b; print ""; ins=1 }
+        { print }
+      ' "$rc" > "$tmp" && atomic_replace "$rc" "$tmp" || rm -f "$tmp"
+    else
+      { printf '%s\n' "$(cat "$rc")"; printf '%s\n' "$block"; } > "$tmp" && atomic_replace "$rc" "$tmp" || rm -f "$tmp"
+    fi
+    break
   done
 fi
 echo "已安装 $bin/bun"
