@@ -4,7 +4,7 @@
 
 基于 **Rust + Tauri 2** 构建（workspace：核心逻辑在零 GUI 依赖的 `devenv-core`，Tauri 为薄壳），前端使用原生 HTML/CSS/JS（无构建工具依赖）。
 
-> **当前版本：v0.2.5-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
+> **当前版本：v0.2.8-beta**。普通用户**无需安装 Rust**，直接下载预编译安装包即可使用。
 
 ## 快速开始（免 Rust 环境）
 
@@ -12,8 +12,8 @@
 
 | 文件 | 用途 |
 |---|---|
-| `DevEnvManager_0.2.5-beta_x64-setup.exe` | 桌面 GUI（Windows），双击安装后从开始菜单启动 |
-| `devenv-cli-0.2.5-beta-windows-x64.zip` | 命令行工具（Windows，内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
+| `DevEnvManager_0.2.8-beta_x64-setup.exe` | 桌面 GUI（Windows），双击安装后从开始菜单启动 |
+| `devenv-cli-0.2.8-beta-windows-x64.zip` | 命令行工具（Windows，内含 `devenv.exe`），解压到任意目录后将其加入 PATH |
 | `devenv-*-unknown-linux-*.tar.gz` + `install.sh` | 命令行工具（Linux / WSL，见下「Linux / WSL 使用」），无 GUI 依赖，免装 Rust |
 
 使用过程中，**无需预装 Rust / Node / Python / Git**——工具会自行检测，缺失时在应用内一键下载并托管安装（Git 走 npmmirror 镜像的 MinGit，免管理员权限）；需要 Git Bash / 右键菜单时也可一键打开官网完整安装包。
@@ -39,14 +39,14 @@
 curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash
 
 # 安装指定版本（把版本号作为参数传给脚本，注意 bash -s --）
-curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.5-beta
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.8-beta
 ```
 
 > 也可从 [Gitee Releases](https://gitee.com/apricotdream/devEnvMangerTool/releases) 下载 `install.sh` 附件后本地执行（效果相同；当前目录若已有 `devenv-*.tar.gz` 会优先本地安装）：
 >
 > ```bash
 > bash install.sh              # 安装最新版
-> bash install.sh 0.2.5-beta   # 安装指定版本
+> bash install.sh 0.2.8-beta   # 安装指定版本
 > ```
 
 **方式二 · 源码安装**（需 Rust 工具链；无系统 gcc 也能构建，用 musl 静态目标 + rust-lld 自包含链接）：
@@ -241,7 +241,7 @@ publish-release.cmd
 ```bash
 # Linux / WSL：curl 一键安装（自动匹配架构 x64/arm64、libc gnu/musl 与最新版本）
 curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash
-curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.5-beta  # 指定版本
+curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh | bash -s -- 0.2.8-beta  # 指定版本
 ```
 
 > 发版前需先把改动合并到 `main`（脚本基于 `origin/main` 打 tag）。版本号在 `core/Cargo.toml`、`src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 三处同步递增；tag 命名为 `v<版本号>`（如 `v0.2.1-beta`），已存在的 tag 会被脚本拒绝。
@@ -271,6 +271,19 @@ curl -fsSL https://gitee.com/apricotdream/devEnvMangerTool/raw/main/install.sh |
 ```
 
 ## 更新日志
+
+### v0.2.8-beta
+- **rc 写入中断自愈 + 原子替换**：PATH 块改为同目录临时文件 + rename 原子写入（Linux 保留原文件权限），写盘中途被杀也不会留下半截 rc；已存在的「有开头标记无结尾标记」残段在下次写入时自动截断修复。
+- **GUI「装到 WSL」脚本同步修复**：桌面端 / Windows CLI 把 bun 装进 WSL 发行版时执行的内嵌 shell 脚本与 CLI 语义对齐——块插入到 `.bashrc` 非交互守卫之前、旧追加块自动搬迁、重复执行幂等；修复 marker 含 `#` 时误用 sed `#` 地址分隔符导致的脚本错误。fresh / 旧版追加 / 中断残段 / 无守卫四种场景均验证幂等。
+
+### v0.2.7-beta
+- **修复非交互 shell 找不到 bun**：Ubuntu/Debian 的 `~/.bashrc` 开头有「非交互直接 return」守卫，旧版本把 PATH 块追加到文件末尾，导致 `wsl -d <发行版> -- <命令>`、IDE/CI 等非交互场景提前 return、读不到 `~/.bun/bin`（交互终端正常，问题隐蔽）。PATH 块改为插入到守卫之前；文件末尾的旧块自动迁移且内容去重。
+- `.bashrc` / `.zshrc` 均改为幂等写入（此前仅 bun 场景写 `.bashrc`），无守卫的 rc 文件保持末尾追加。
+
+### v0.2.6-beta
+- **bun 迁移官方 `~/.bun/bin` 布局**：Linux/WSL 侧 bun 不再装入 `~/.local/bin`，改为官方标准布局 `~/.bun/bin/bun` 并写入 `BUN_INSTALL`；安装时自动清理旧版（≤v0.2.5）`~/.local/bin/bun` 软链，避免遮盖新布局。
+- **支持装进指定 WSL 发行版**：新增 `devenv node bun install-wsl` 与 GUI「装到 WSL」，在 Windows 侧把 Linux 版 bun 装进所选 WSL 发行版的 `~/.bun/bin`（走 npmmirror 镜像）。
+- WSL 下检测到 bun 为 Windows interop（`/mnt/c/...`）时给出数字选择菜单，引导安装 Linux 原生版。
 
 ### v0.2.5-beta
 - **Linux CLI 与桌面端功能对齐（8 项）**：本轮把桌面端已有、CLI 缺失的能力补齐到 Linux/WSL `devenv`。
