@@ -353,27 +353,116 @@ fn path_has_local_bin() -> bool {
 }
 
 const RC_MARKER: &str = "# >>> devenv >>>";
+const RC_END: &str = "# <<< devenv <<<";
 const RC_APPEND_BASH: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
 const RC_APPEND_ZSH: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
 const RC_FISH_FILE: &str = "set -gx PATH \"$HOME/.local/bin\" $PATH";
 
-fn append_rc_block(path: &Path, content: &[&str]) -> Result<(), String> {
+/// 定位 Ubuntu/Debian 默认 `.bashrc` 顶部「非交互 shell 直接 return」守卫的起始位置。
+///
+/// 默认 `.bashrc` 开头是：
+/// ```bash
+/// case $- in
+///     *i*) ;;
+///       *) return;;
+/// esac
+/// ```
+/// 非交互 shell（`wsl -d dist -- cmd`、IDE、脚本）会在守卫里 `return`，
+/// 守卫**之后**（包括文件末尾追加）的 PATH 导出永远读不到；块必须放到守卫**之前**。
+/// 返回守卫整块起始字节偏移；找不到守卫时返回 None（追加到文件末尾即可）。
+fn noninteractive_guard_start(text: &str) -> Option<usize> {
+    let re = regex::Regex::new(
+        r"(?ms)^case\s+\$-\s+in\s*\n\s*\*i\*\)\s*;;\s*\n\s*\*\)\s*return;;\s*\n\s*esac\s*\n",
+    )
+    .ok()?;
+    Some(re.find(text)?.start())
+}
+
+/// 取出 `marker..end_marker` 之间的既有块内容（含 marker/end 行之外的内容行），
+/// 用于把旧版本追加到文件末尾的块整体搬到守卫之前（自愈）。
+fn extract_rc_block<'a>(text: &'a str, marker: &str, end: &str) -> Option<(usize, usize, Vec<String>)> {
+    let start = text.find(marker)?;
+    let line_start = text[..start].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let rest = &text[start..];
+    let end_rel = rest.find(end)?;
+    let end_abs = start + end_rel + end.len();
+    let line_end = text[end_abs..]
+        .find('\n')
+        .map(|p| end_abs + p + 1)
+        .unwrap_or(text.len());
+    let block = &rest[..end_rel];
+    let inner: Vec<String> = block
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && t != marker
+        })
+        .map(|l| l.to_string())
+        .collect();
+    Some((line_start, line_end, inner))
+}
+
+/// 幂等写入一个 marker 包裹的 shell 块。
+///
+/// - 块已存在且位于非交互 return 守卫之前：不动；
+/// - 块已存在但位于守卫之后（≤0.2.6 的旧布局，末尾追加）：整体搬到守卫之前；
+/// - 块不存在：插到守卫之前，无守卫则追加末尾。
+fn write_rc_block(path: &Path, marker: &str, end: &str, content: &[&str]) -> Result<bool, String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    if text.contains(RC_MARKER) {
-        return Ok(()); // 幂等
+    let block_lines: Vec<String>;
+    let mut body = text.clone();
+
+    if let Some((s, e, inner)) = extract_rc_block(&text, marker, end) {
+        // 已存在：判断是否在守卫之前
+        if let Some(pos) = noninteractive_guard_start(&text) {
+            if s > pos {
+                // 旧块在守卫之后（末尾）：摘除后插到守卫前
+                let mut removed = text.clone();
+                removed.replace_range(s..e, "");
+                body = removed;
+                block_lines = inner;
+            } else {
+                return Ok(false); // 已在守卫之前，幂等
+            }
+        } else {
+            return Ok(false); // 无守卫，原位置即可
+        }
+    } else {
+        block_lines = content.iter().map(|s| s.to_string()).collect();
     }
-    let mut out = text.trim_end().to_string();
-    if !out.is_empty() {
+
+    let mut block = String::new();
+    block.push_str(marker);
+    block.push('\n');
+    for line in &block_lines {
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.push_str(end);
+    block.push('\n');
+
+    let out = if let Some(pos) = noninteractive_guard_start(&body) {
+        let mut out = String::with_capacity(body.len() + block.len());
+        out.push_str(&body[..pos]);
+        out.push_str(&block);
         out.push('\n');
-    }
-    out.push_str(RC_MARKER);
-    out.push('\n');
-    for line in content {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("# <<< devenv <<<\n");
-    std::fs::write(path, out).map_err(|e| format!("写入 {} 失败：{}", path.display(), e))
+        out.push_str(&body[pos..]);
+        out
+    } else {
+        let mut out = body.trim_end().to_string();
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&block);
+        out
+    };
+
+    std::fs::write(path, out).map_err(|e| format!("写入 {} 失败：{}", path.display(), e))?;
+    Ok(true)
+}
+
+fn append_rc_block(path: &Path, content: &[&str]) -> Result<(), String> {
+    write_rc_block(path, RC_MARKER, RC_END, content).map(|_| ())
 }
 
 /// 若 `~/.local/bin` 不在 PATH，注入到已存在的 bash/zsh rc 或 fish conf.d（自动创建）。
@@ -1136,22 +1225,8 @@ fn ensure_bun_bin_in_path() {
     for rc_name in [".bashrc", ".zshrc"] {
         let rc = home.join(rc_name);
         if rc.exists() {
-            let text = std::fs::read_to_string(&rc).unwrap_or_default();
-            if text.contains(BUN_RC_MARKER) {
-                return; // 幂等
-            }
-            let mut out = text.trim_end().to_string();
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(BUN_RC_MARKER);
-            out.push('\n');
-            out.push_str(line);
-            out.push('\n');
-            out.push_str(BUN_RC_END);
-            out.push('\n');
-            let _ = std::fs::write(&rc, out);
-            return;
+            // write_rc_block 幂等；若旧版本把块追加到了非交互守卫之后，会自动搬到守卫之前。
+            let _ = write_rc_block(&rc, BUN_RC_MARKER, BUN_RC_END, &[line]);
         }
     }
 }
@@ -1553,4 +1628,94 @@ pub fn apply_python_project(path: String) -> Result<String, String> {
         msgs.push("未检测到项目 Python 版本要求（.python-version / pyproject.toml / runtime.txt / Pipfile）".to_string());
     }
     Ok(msgs.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    const M: &str = "# >>> test >>>";
+    const E: &str = "# <<< test <<<";
+    const LINE: &str = "export PATH=\"/x:$PATH\"";
+
+    fn write_tmp(name: &str, content: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("devenv-rc-test-{name}.bashrc"));
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn appends_when_no_guard() {
+        let p = write_tmp("no-guard", "# my bashrc\nalias ll='ls -l'\n");
+        write_rc_block(&p, M, E, &[LINE]).unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains(M) && out.contains(LINE) && out.contains(E));
+        assert!(out.find(M).unwrap() > out.find("alias").unwrap());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn inserts_before_noninteractive_guard() {
+        let bashrc = "\
+# ~/.bashrc
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+HISTCONTROL=ignoreboth
+";
+        let p = write_tmp("guard", bashrc);
+        write_rc_block(&p, M, E, &[LINE]).unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        let bp = out.find("case $-").unwrap();
+        assert!(out.find(M).unwrap() < bp, "PATH block must precede the guard");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn relocates_legacy_trailing_block_before_guard() {
+        let bashrc = "\
+# ~/.bashrc
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+HISTCONTROL=ignoreboth
+# >>> test >>>
+export PATH=\"/old:$PATH\"
+# <<< test <<<
+";
+        let p = write_tmp("legacy", bashrc);
+        write_rc_block(&p, M, E, &[LINE]).unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        let bp = out.find("case $-").unwrap();
+        let mp = out.find(M).unwrap();
+        assert!(mp < bp, "legacy trailing block must move before guard");
+        assert!(out.contains("/old"), "existing block content must be preserved");
+        assert_eq!(out.matches(M).count(), 1, "block must not be duplicated");
+        assert!(!out.contains("HISTCONTROL=ignoreboth\n# >>>"), "old block removed from tail");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn idempotent_when_already_before_guard() {
+        let bashrc = "\
+# ~/.bashrc
+# >>> test >>>
+export PATH=\"/x:$PATH\"
+# <<< test <<<
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+";
+        let p = write_tmp("idem", bashrc);
+        let changed = write_rc_block(&p, M, E, &[LINE]).unwrap();
+        assert!(!changed);
+        std::fs::remove_file(&p).ok();
+    }
 }
