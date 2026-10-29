@@ -11,9 +11,14 @@
 //!
 //! 凡是「选择版本 / 账号」的命令，省略参数即进入数字选择菜单；也可直接带参数用于脚本。
 
+#[path = "devenv/go_cli.rs"]
+mod go_cli;
+#[path = "devenv/update_cli.rs"]
+mod update_cli;
+
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // ── 交互式输入（数字选择菜单）──────────────────────────────────────
 
@@ -96,6 +101,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 检查、下载和安装 CLI 自身更新（普通环境命令不自动检查）
+    Update {
+        #[command(subcommand)]
+        action: Option<update_cli::UpdateCmd>,
+    },
+    /// Go 环境管理（省略动作进入数字菜单）
+    Go {
+        #[command(subcommand)]
+        action: Option<go_cli::GoCmd>,
+    },
     /// Node.js 相关操作（省略动作进入数字菜单）
     Node {
         #[command(subcommand)]
@@ -154,6 +169,17 @@ enum NodeCmd {
         /// 跳过 y/N 确认（脚本用；仍会先 dry-run）
         #[arg(long)]
         yes: bool,
+        /// 只打包演练，不上传
+        #[arg(long)]
+        dry_run: bool,
+        /// scoped 包可见性；省略遵循 npm 配置
+        #[arg(long, value_parser = ["public", "restricted"])]
+        access: Option<String>,
+        #[arg(long)]
+        otp: Option<String>,
+        /// 使用已管理的 npm 账号 ID 或名称
+        #[arg(long)]
+        account: Option<String>,
     },
 }
 
@@ -259,12 +285,14 @@ fn fail(msg: String) -> ! {
 }
 
 /// 顶部模块菜单项：(名称, 说明)。
-fn module_menu() -> [(&'static str, &'static str); 4] {
+fn module_menu() -> [(&'static str, &'static str); 6] {
     [
         ("Node.js", "环境体检 / 版本安装切换 / npm 镜像"),
         ("Python", "环境体检 / 版本安装切换 / pip 镜像"),
         ("Git", "环境体检 / 账号与密钥 / 身份切换 / 仓库同步"),
+        ("Go", "环境体检 / 版本安装切换 / 模块代理 / 工具 / 项目"),
         ("环境体检 doctor", "工具链 / PATH / 软链 / shell 配置 一键体检"),
+        ("应用更新", "检查 / 下载校验 / 安装 CLI 更新"),
     ]
 }
 
@@ -284,6 +312,8 @@ fn main() {
                 Some(("Git", _)) => {
                     pick_git_action();
                 }
+                Some(("Go", _)) => go_cli::run(None),
+                Some(("应用更新", _)) => update_cli::run(None),
                 Some(("环境体检 doctor", _)) => run_doctor(),
                 Some(_) => unreachable!(),
                 None => break, // q / 非交互
@@ -301,7 +331,9 @@ fn main() {
         Some(Command::Node { action: Some(cmd) }) => run_node(cmd),
         Some(Command::Python { action: Some(cmd) }) => run_python(cmd),
         Some(Command::Git { action: Some(cmd) }) => run_git(cmd),
+        Some(Command::Go { action }) => go_cli::run(action),
         Some(Command::Doctor) => run_doctor(),
+        Some(Command::Update { action }) => update_cli::run(action),
     }
 }
 
@@ -389,7 +421,7 @@ fn pick_node_action() -> NodeCmd {
             "test" => NodeCmd::Test { url: None },
             "bun" => NodeCmd::Bun { action: None },
             "accounts" => NodeCmd::Accounts,
-            "publish" => NodeCmd::Publish { dir: None, registry: None, build: false, yes: false },
+            "publish" => NodeCmd::Publish { dir: None, registry: None, build: false, yes: false, dry_run:false, access:None, otp:None, account:None },
             _ => return,
         };
         run_node(chosen.clone());
@@ -607,7 +639,7 @@ fn run_node(cmd: NodeCmd) {
         NodeCmd::Test { url } => run_node_test(url),
         NodeCmd::Bun { action } => run_bun(action),
         NodeCmd::Accounts => run_npm_accounts(),
-        NodeCmd::Publish { dir, registry, build, yes } => run_npm_publish(dir, registry, build, yes),
+        NodeCmd::Publish { dir, registry, build, yes, dry_run, access, otp, account } => run_npm_publish(dir, registry, build, yes, dry_run, access, otp, account),
     }
 }
 
@@ -804,7 +836,7 @@ fn run_bun_action(action: BunAction) {
 /// npm 发布账号：扫描 ~/.npmrc 已有凭据，纳入管理 / 切换激活。
 fn run_npm_accounts() {
     use devenv_core::api;
-    let managed = api::list_accounts();
+    let managed = api::list_accounts().unwrap_or_else(|e| fail(e));
     println!("已管理账号（{} 个，激活: {}）:",
         managed.accounts.len(),
         managed.active.as_deref().unwrap_or("无"));
@@ -859,143 +891,50 @@ fn run_npm_accounts() {
     }
 }
 
-/// 读取根目录单包（package.json 直接在 dir 下）。共享扫描器只看 packages/ 子目录，
-/// CLI 这里补上单包场景。
-fn read_root_package(root: &str) -> Option<devenv_core::PublishPackage> {
-    let pj = Path::new(root).join("package.json");
-    let content = std::fs::read_to_string(&pj).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let name = v["name"].as_str()?.to_string();
-    let version = v["version"].as_str()?.to_string();
-    if name.is_empty() || version.is_empty() {
-        return None;
-    }
-    let dir = Path::new(root).canonicalize().unwrap_or_else(|_| PathBuf::from(root));
-    Some(devenv_core::PublishPackage {
-        name,
-        version,
-        dir: dir.to_string_lossy().to_string(),
-        has_dist: dir.join("dist").is_dir(),
-        is_private: v["private"].as_bool().unwrap_or(false),
-    })
-}
-
-/// 发布 npm 包：扫描 → dry-run → 确认 → 真发。
-fn run_npm_publish(dir: Option<String>, registry: Option<String>, build: bool, yes: bool) {
+/// GUI 和脚本均复用同一发布实现；--yes / --dry-run 全程无需交互。
+#[allow(clippy::too_many_arguments)]
+fn run_npm_publish(dir: Option<String>, mut registry: Option<String>, build: bool, yes: bool,
+    dry_run: bool, access: Option<String>, otp: Option<String>, account: Option<String>) {
     use devenv_core::api;
-    let root = dir.unwrap_or_else(|| ".".to_string());
-    let mut pkgs = match api::list_publish_packages(root.clone()) {
-        Ok(p) => p,
-        Err(e) => fail(format!("扫描包失败: {}", e)),
-    };
-    // CLI 额外支持单包（根目录 package.json）；共享扫描器只看 monorepo 的 packages/ 子目录。
-    if let Some(root_pkg) = read_root_package(&root) {
-        if !pkgs.iter().any(|p| p.dir == root_pkg.dir) {
-            pkgs.insert(0, root_pkg);
-        }
+    let interactive = !yes && !dry_run;
+    if let Some(selected) = account {
+        let accounts = api::list_accounts().unwrap_or_else(|e| fail(e));
+        let found: Vec<_> = accounts.accounts.iter().filter(|a| a.id == selected || a.name == selected).collect();
+        if found.len() != 1 { fail("账号未找到或名称不唯一，请使用账号 ID".into()); }
+        api::switch_account(found[0].id.clone()).unwrap_or_else(|e| fail(e));
+        if registry.is_none() { registry = Some(found[0].registry.clone()); }
     }
-    if pkgs.is_empty() {
-        fail("未找到可发布的包（需要含 name/version 的 package.json，或 packages/* 子目录）".to_string());
-    }
-    println!("发现 {} 个包:", pkgs.len());
-    for (i, p) in pkgs.iter().enumerate() {
-        println!(
-            "  [{}] {}@{}  {}{}",
-            i + 1,
-            p.name,
-            p.version,
-            if p.is_private { "[private] " } else { "" },
-            if p.has_dist { "有 dist" } else { "无 dist" }
-        );
-    }
-    // 选择要发布的包（默认全部非 private）
-    let chosen: Vec<String> = match prompt_line("输入要发布的序号（逗号分隔，直接回车 = 全部非 private）: ") {
-        Some(s) if !s.is_empty() => s
-            .split([',', ' '])
-            .filter_map(|t| t.trim().parse::<usize>().ok())
-            .filter(|n| *n >= 1 && *n <= pkgs.len())
-            .map(|n| pkgs[n - 1].dir.clone())
-            .collect(),
+    let pkgs = api::list_publish_packages(dir.unwrap_or_else(|| ".".into())).unwrap_or_else(|e| fail(e));
+    for (i, p) in pkgs.iter().enumerate() { println!("  [{}] {}@{}{}", i + 1, p.name, p.version, if p.is_private { " [private]" } else { "" }); }
+    let selection = if interactive { prompt_line("发布序号（逗号分隔，回车选全部非 private）: ") } else { None };
+    let chosen: Vec<String> = match selection {
+        Some(s) if !s.is_empty() => s.split([',', ' ']).filter_map(|t| t.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 1 && *n <= pkgs.len()).map(|n| pkgs[n-1].dir.clone()).collect(),
         _ => pkgs.iter().filter(|p| !p.is_private).map(|p| p.dir.clone()).collect(),
     };
-    if chosen.is_empty() {
-        fail("没有选中任何可发布的包（private 包需显式选序号）".to_string());
-    }
-
-    let reg = registry.unwrap_or_else(|| {
-        match prompt_line("发布源 registry（直接回车 = https://registry.npmjs.org）: ") {
-            Some(s) if !s.is_empty() => s,
-            _ => "https://registry.npmjs.org".to_string(),
+    if chosen.is_empty() { fail("未找到可发布的非 private 包".into()); }
+    let reg = registry.unwrap_or_else(|| "https://registry.npmjs.org".into());
+    let build = build || (interactive && prompt_yes("发布前执行 npm run build？", false));
+    let access = if access.is_none() && interactive {
+        prompt_line("可见性 public / restricted（回车遵循 npm 配置）: ").filter(|s| !s.is_empty())
+    } else { access };
+    println!("— dry-run 演练，不上传 —");
+    let preview = api::publish_packages(chosen.clone(), reg.clone(), build, None, Some(true), access.clone()).unwrap_or_else(|e| fail(e));
+    for r in &preview { println!("{} {}: {}", if r.ok { "✓" } else { "✗" }, r.name, r.message); }
+    if preview.iter().any(|r| !r.ok) { fail("演练失败，已停止".into()); }
+    if dry_run { return; }
+    if interactive && !prompt_yes(&format!("确认发布 {} 个包到 {}？", chosen.len(), reg), false) { return; }
+    let mut results = api::publish_packages(chosen.clone(), reg.clone(), false, otp.clone(), Some(false), access.clone()).unwrap_or_else(|e| fail(e));
+    let retry: Vec<usize> = results.iter().enumerate().filter(|(_, r)| r.needs_otp).map(|(i, _)| i).collect();
+    if interactive && otp.is_none() && !retry.is_empty() {
+        if let Some(code) = prompt_line("输入 OTP（q 取消）: ").filter(|s| !s.is_empty() && s != "q") {
+            let dirs = retry.iter().map(|i| chosen[*i].clone()).collect();
+            let retried = api::publish_packages(dirs, reg, false, Some(code), Some(false), access).unwrap_or_else(|e| fail(e));
+            for (i, result) in retry.into_iter().zip(retried) { results[i] = result; }
         }
-    });
-    let build = build || prompt_yes("发布前执行 npm run build？", false);
-
-    // 1) dry-run 预检
-    println!("\n— 先执行 dry-run 预检 —");
-    match api::publish_packages(chosen.clone(), reg.clone(), build, None, Some(true)) {
-        Ok(results) => {
-            let mut all_ok = true;
-            for r in &results {
-                let mark = if r.ok { "✓" } else { "✗" };
-                for (i, line) in r.message.lines().enumerate() {
-                    if i == 0 {
-                        println!("  {} {}: {}", mark, r.name, line);
-                    } else {
-                        println!("      {}", line);
-                    }
-                }
-                if !r.ok {
-                    all_ok = false;
-                }
-            }
-            if !all_ok {
-                fail("dry-run 存在失败项，已中止（未真实发布）".to_string());
-            }
-        }
-        Err(e) => fail(format!("dry-run 失败: {}", e)),
     }
-
-    // 2) 确认后真发
-    if !yes && !prompt_yes(&format!("\n确认真实发布 {} 个包到 {}？此操作不可逆！", chosen.len(), reg), false) {
-        println!("已取消（未发布）");
-        return;
-    }
-    publish_for_real(chosen, reg, build, None);
-}
-
-/// 真实发布；遇 needs_otp 提示输入 OTP 后重试。
-fn publish_for_real(packages: Vec<String>, reg: String, build: bool, otp: Option<String>) {
-    use devenv_core::api;
-    match api::publish_packages(packages.clone(), reg.clone(), build, otp.clone(), Some(false)) {
-        Ok(results) => {
-            let mut need_otp: Vec<String> = Vec::new();
-            for r in &results {
-                let mark = if r.ok { "✓" } else { "✗" };
-                for (i, line) in r.message.lines().enumerate() {
-                    if i == 0 {
-                        println!("  {} {}: {}", mark, r.name, line);
-                    } else {
-                        println!("      {}", line);
-                    }
-                }
-                if r.needs_otp {
-                    need_otp.push(r.name.clone());
-                }
-                if let Some(h) = &r.hint {
-                    println!("      提示: {} ({})", h.text, h.url);
-                }
-            }
-            if !need_otp.is_empty() && otp.is_none() {
-                match prompt_line("检测到 2FA，输入 OTP 验证码（q 取消）: ") {
-                    Some(code) if !code.is_empty() && !code.eq_ignore_ascii_case("q") => {
-                        publish_for_real(packages, reg, build, Some(code));
-                    }
-                    _ => println!("已取消（未发布需 OTP 的包）"),
-                }
-            }
-        }
-        Err(e) => fail(format!("发布失败: {}", e)),
-    }
+    for r in &results { println!("{} {}: {}", if r.ok { "✓" } else { "✗" }, r.name, r.message); }
+    if results.iter().any(|r| !r.ok) { fail("存在发布失败项；成功的包不会重发".into()); }
 }
 
 // ── Python ──────────────────────────────────────────────────────

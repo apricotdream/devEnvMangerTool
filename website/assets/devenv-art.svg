@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="800" viewBox="0 0 1500 800" fill="none">
+  <title>Node.js、Python、Go、Git 在同一工作台生长</title>
+  <defs>
+    <linearGradient id="frame" x1="766" y1="218" x2="1364" y2="621" gradientUnits="userSpaceOnUse"><stop stop-color="#fcfae9"/><stop offset="1" stop-color="#b5d3c0"/></linearGradient>
+    <linearGradient id="screen" x1="850" y1="250" x2="1250" y2="575" gradientUnits="userSpaceOnUse"><stop stop-color="#345b50"/><stop offset="1" stop-color="#1f3e39"/></linearGradient>
+    <linearGradient id="leaf" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse"><stop stop-color="#dfe5bb"/><stop offset="1" stop-color="#7fbaa6"/></linearGradient>
+    <radialGradient id="halo"><stop stop-color="#c5dbb5" stop-opacity=".5"/><stop offset="1" stop-color="#c5dbb5" stop-opacity="0"/></radialGradient>
+    <g id="leaf-shape"><path d="M0 80C-8 35 20 6 61 0C66 39 42 77 0 80Z" fill="url(#leaf)" stroke="#6d9c87" stroke-width="1.5"/><path d="M0 80 49 13" stroke="#f7f4d6" stroke-width="2"/></g>
+  </defs>
+  <ellipse cx="1100" cy="417" rx="382" ry="354" fill="url(#halo)"/>
+  <g stroke="#b1c8ad" fill="none"><circle cx="1090" cy="383" r="284" stroke-dasharray="2 14" opacity=".7"/><path d="M810 325c-100-210 410-297 530-77M779 568c114 162 495 112 596-42" opacity=".45"/></g>
+  <g stroke="#709987" stroke-width="5" stroke-linecap="round"><path d="M1065 690c-97-104-138-128-161-246M902 448c-116-69-162-123-169-194M910 467c-24-134 43-191 57-262M1231 600c100-67 126-178 125-302M1354 383c43-57 62-110 51-170"/></g>
+  <g opacity=".9"><use href="#leaf-shape" transform="translate(727 321) rotate(-70) scale(.9)"/><use href="#leaf-shape" transform="translate(758 353) rotate(5) scale(.8)"/><use href="#leaf-shape" transform="translate(819 408) rotate(-60) scale(.8)"/><use href="#leaf-shape" transform="translate(947 264) rotate(17) scale(.7)"/><use href="#leaf-shape" transform="translate(1370 326) rotate(-7) scale(.85)"/><use href="#leaf-shape" transform="translate(1359 456) rotate(39) scale(.8)"/><use href="#leaf-shape" transform="translate(1400 242) rotate(-20) scale(.7)"/></g>
+  <ellipse cx="1097" cy="687" rx="284" ry="24" fill="#507e69" opacity=".15"/>
+  <path d="M1001 582h180l23 87H978Z" fill="#abc7b1" stroke="#739b87" stroke-width="2"/>
+  <path d="M991 638h200l13 31H978Z" fill="#e4e8cc"/>
+  <path d="M932 668h320l25 15H907Z" fill="#d5ddbd" stroke="#84a28a" stroke-width="2" stroke-linejoin="round"/>
+  <rect x="801" y="216" width="579" height="388" rx="20" fill="url(#frame)" stroke="#729a87" stroke-width="2"/>
+  <rect x="818" y="233" width="545" height="345" rx="8" fill="url(#screen)"/>
+  <path d="M818 280h545" stroke="#92b19a" stroke-opacity=".4"/>
+  <g fill="#d9deae"><circle cx="841" cy="256" r="4"/><circle cx="858" cy="256" r="4"/><circle cx="875" cy="256" r="4"/></g>
+  <text x="925" y="261" fill="#e8ebd4" font-family="sans-serif" font-size="13" letter-spacing="2">DevEnvManager</text>
+  <path d="M843 304h112v247H843Z" fill="#1b3c34" opacity=".55"/>
+  <g font-family="sans-serif" font-size="15" fill="#e5e8d1"><text x="864" y="339">Node.js</text><text x="864" y="387">Python</text><text x="864" y="435">Go</text><text x="864" y="483">Git</text></g>
+  <g fill="#b5cd9c"><circle cx="938" cy="334" r="3"/><circle cx="938" cy="382" r="3"/><circle cx="938" cy="430" r="3"/><circle cx="938" cy="478" r="3"/></g>
+  <path d="m989 319 11 10-11 10m21 0h15" stroke="#d8deb2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="990" y="378" fill="#f0efd9" font-family="sans-serif" font-size="26" font-weight="600">Ready to build.</text>
+  <text x="991" y="407" fill="#b2cbb7" font-family="sans-serif" font-size="14">One workspace. Your toolchains.</text>
+  <g stroke="#7f9e83" stroke-width="2" opacity=".6"><path d="M991 441h335M991 483h335M991 525h335"/></g>
+  <g fill="#bacfab"><rect x="992" y="456" width="94" height="5" rx="2.5"/><rect x="992" y="499" width="124" height="5" rx="2.5"/></g>
+  <g stroke="#c6d8af" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m1298 461 5 5 9-12m-14 50 5 5 9-12"/></g>
+  <g transform="translate(793 138) rotate(-8)"><rect width="128" height="66" rx="12" fill="#f7f4df" stroke="#88ac8f" stroke-width="2"/><path d="m20 22 10-6 10 6v12l-10 6-10-6Z" stroke="#67936e" stroke-width="2"/><text x="51" y="39" fill="#345a42" font-family="sans-serif" font-size="18">Node.js</text></g>
+  <g transform="translate(1127 122) rotate(8)"><rect width="137" height="65" rx="12" fill="#f7f4df" stroke="#88ac8f" stroke-width="2"/><path d="M21 23h19v9H26v10H17v-9h16M26 18h14v24H26" stroke="#a99350" stroke-width="2" stroke-linejoin="round"/><text x="52" y="39" fill="#345a42" font-family="sans-serif" font-size="18">Python</text></g>
+  <g transform="translate(1258 621) rotate(-9)"><rect width="111" height="64" rx="12" fill="#f7f4df" stroke="#88ac8f" stroke-width="2"/><path d="M16 24h14m-19 8h16m-10 8h13" stroke="#6c9d9e" stroke-width="2" stroke-linecap="round"/><text x="39" y="41" fill="#3c6d6d" font-family="sans-serif" font-size="25" font-weight="700" font-style="italic">GO</text></g>
+  <g transform="translate(805 616) rotate(7)"><rect width="109" height="64" rx="12" fill="#f7f4df" stroke="#88ac8f" stroke-width="2"/><path d="m18 32 13-13 13 13-13 13Z" fill="#ae9b65"/><path d="m27 23 11 10m-7-6v13" stroke="#f7f4df" stroke-width="2"/><text x="55" y="40" fill="#345a42" font-family="sans-serif" font-size="21">Git</text></g>
+  <g fill="#c8b475"><path d="m766 495 4 10 10 4-10 4-4 10-4-10-10-4 10-4Z"/><path d="m1323 160 3 7 7 3-7 3-3 7-3-7-7-3 7-3Z"/></g>
+</svg>

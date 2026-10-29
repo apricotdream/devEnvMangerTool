@@ -45,7 +45,7 @@
     ],
   };
 
-  const MOCK_REGISTRY = "http://192.168.3.8:8980/repository/npm-group/";
+  const MOCK_REGISTRY = "https://npm.example.invalid/";
 
   /* ---------------- 后端 API ---------------- */
 
@@ -56,8 +56,82 @@
     done: "完成",
   };
 
+  // 浏览器预览只操作内存，界面操作可演示，真实功能通过 Tauri 调用。
+  const goMock = {
+    current: "go1.26.1", installed: ["go1.26.1"],
+    available: ["go1.26.1", "go1.25.7", "go1.24.13"],
+    env: { GOROOT: "C:\\DevEnvManager\\go\\go1.26.1", GOPATH: "C:\\Users\\dev\\go", GOBIN: "", GOPROXY: "https://proxy.golang.org,direct", GOPRIVATE: "", GOSUMDB: "sum.golang.org", GOENV: "C:\\Users\\dev\\AppData\\Roaming\\go\\env", GOTOOLCHAIN: "auto" },
+    tools: new Set(),
+  };
+  function goPreview(r) {
+    const root = "C:\\DevEnvManager\\go";
+    switch (r.action) {
+      case "status": return { installed: !!goMock.current, managed: !!goMock.current, version: goMock.current ? `go version ${goMock.current} windows/amd64` : null, path: goMock.current ? `${root}\\${goMock.current}\\bin\\go.exe` : null, env: { ...goMock.env, GOROOT: goMock.current ? `${root}\\${goMock.current}` : "" }, installDir: root };
+      case "versions": return { current: goMock.current, installed: goMock.installed.map((version) => ({ version, current: version === goMock.current })), available: goMock.available, installDir: root };
+      case "install": {
+        const version = r.version || goMock.available[0];
+        if (!/^(?:go)?\d+\.\d+(?:\.\d+)?$/.test(version)) throw new Error("请输入有效 Go 版本");
+        const normalized = version.startsWith("go") ? version : "go" + version;
+        if (!goMock.installed.includes(normalized)) goMock.installed.push(normalized);
+        goMock.current = normalized;
+        return { message: `已安装并切换到 ${normalized}（预览）` };
+      }
+      case "switch": goMock.current = r.version; return { message: `已切换到 ${r.version}（预览）` };
+      case "uninstall": goMock.installed = goMock.installed.filter((v) => v !== r.version); if (goMock.current === r.version) goMock.current = null; return { message: `已卸载 ${r.version}（预览）` };
+      case "fix-path": return { message: "Go PATH 已修复（预览）" };
+      case "proxy": return { ...goMock.env };
+      case "proxy-set": goMock.env.GOPROXY = r.url; goMock.env.GOPRIVATE = r.private || ""; return { message: "代理配置已保存（预览）" };
+      case "test": return [{ url: r.url, ok: true, latencyMs: 68 }];
+      case "tools": return ["gopls", "dlv", "goimports"].map((name) => ({ name, installed: goMock.tools.has(name), version: goMock.tools.has(name) ? "预览版本" : null, path: goMock.tools.has(name) ? `C:\\Users\\dev\\go\\bin\\${name}.exe` : null, dataDir: "C:\\Users\\dev\\go\\bin" }));
+      case "tool-install": goMock.tools.add(r.name); return { message: `已安装 ${r.name}（预览）` };
+      case "project": return { path: r.path, module: "example.com/demo", source: "go.mod", goVersion: "1.25.0", toolchain: "go1.26.1", requiredVersion: "go1.26.1" };
+      case "project-apply": return { message: "项目 Go 环境已应用，依赖已下载（预览）" };
+      default: throw new Error("未知 Go 预览操作");
+    }
+  }
+
   window.Backend = {
     IS_TAURI,
+
+    async appVersion() {
+      return IS_TAURI ? _invoke("app_version") : "0.2.9-beta";
+    },
+    async checkAppUpdate(automatic = false) {
+      if (IS_TAURI) return _invoke("check_app_update", { automatic });
+      await _delay(200);
+      const mode = new URLSearchParams(window.location.search).get("updatePreview");
+      if (mode === "error") throw new Error("预览：网络连接失败，请手动重试");
+      const available = mode === "available";
+      return { currentVersion:"0.2.9-beta", latestVersion:available ? "0.2.10-beta" : "0.2.9-beta", available, canInstall:available,
+        notes:"改进环境管理与发布体验。\n修复已知问题。", releaseUrl:"https://gitee.com/apricotdream/devEnvMangerTool/releases", message:null };
+    },
+    async downloadAppUpdate(version, onProgress) {
+      if (!IS_TAURI) {
+        for (const stage of ["checksums", "downloading", "verifying", "ready"]) {
+          onProgress?.({ stage, bytes:stage === "downloading" ? 10485760 : 0 });
+          await _delay(180);
+        }
+        return "预览：安装包已下载并校验，可点击退出并安装";
+      }
+      const unlisten = await window.__TAURI__.event.listen("app-update-progress", (event) => onProgress?.(event.payload));
+      try { return await _invoke("download_app_update", { version }); }
+      finally { unlisten(); }
+    },
+    async installAppUpdate(version) {
+      if (IS_TAURI) return _invoke("install_app_update", { version });
+      await _delay(100);
+    },
+
+    async goPickProject() {
+      if (IS_TAURI) return this.pickProject();
+      return "C:\\projects\\go-demo";
+    },
+
+    async goCommand(request) {
+      if (IS_TAURI) return _invoke("go_command", { request });
+      await _delay(180);
+      return goPreview(request);
+    },
 
     async detectNode() {
       if (IS_TAURI) return _invoke("detect_node");
@@ -184,10 +258,10 @@
       if (IS_TAURI) return _invoke("probe_cert", { registry });
       await _delay(300);
       return {
-        host: "192.168.3.8",
+        host: "npm.example.invalid",
         port: 181,
-        subject: "CN=192.168.3.8",
-        issuer: "CN=192.168.3.8",
+        subject: "CN=npm.example.invalid",
+        issuer: "CN=npm.example.invalid",
         selfSigned: true,
         sha256: "MOCKFINGERPRINT000000000000000000000000000000000000000000000000",
         pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----",
@@ -218,6 +292,9 @@
     async listPublishPackages(projectDir) {
       if (IS_TAURI) return _invoke("list_publish_packages", { projectDir });
       await _delay(250);
+      if (new URLSearchParams(window.location.search).get("publishPreview")) {
+        return ["one", "two", "three"].map((name) => ({ name:`@demo/${name}`, version:"1.0.0-beta.1", dir:`C:\\preview\\npm-workspace\\packages\\${name}`, hasDist:true, isPrivate:false }));
+      }
       return [];
     },
 
@@ -227,10 +304,15 @@
       return { exists: false, versions: [], error: null };
     },
 
-    async publishPackages(packages, registry, build) {
-      if (IS_TAURI) return _invoke("publish_packages", { packages, registry, build });
+    async publishPackages(packages, registry, build, otp = null, dryRun = false, access = null) {
+      if (IS_TAURI) return _invoke("publish_packages", { packages, registry, build, otp, dryRun, access });
       await _delay(600);
-      return packages.map((d) => ({ name: d, version: "0.0.0", ok: true, message: "模拟发布成功" }));
+      const scenario = new URLSearchParams(window.location.search).get("publishPreview");
+      if (scenario === "otp" && !dryRun) {
+        return packages.map((dir, index) => ({ name:dir, version:"1.0.0-beta.1", ok:otp === "123456" || index === 0,
+          needsOtp:!otp && index === 1, message:otp ? "模拟：验证码重试成功" : index === 0 ? "模拟：发布成功" : index === 1 ? "模拟：需要验证码" : "模拟：Token 权限不足" }));
+      }
+      return packages.map((d) => ({ name:d, version:"0.0.0", ok:true, message:dryRun ? "模拟演练成功（未上传）" : "模拟发布成功" }));
     },
 
     async checkNodeExtraCa() {
@@ -365,8 +447,8 @@
     },
 
     async gitPickRepo() {
-      if (IS_TAURI && window.__TAURI__.dialog) {
-        const sel = await window.__TAURI__.dialog.open({ directory: true, title: "选择仓库目录" });
+      if (IS_TAURI) {
+        const sel = await _invoke("plugin:dialog|open", { options: { directory: true, title: "选择仓库目录" } });
         return typeof sel === "string" ? sel : "";
       }
       await _delay(100);
@@ -504,8 +586,8 @@
     },
 
     async pickFolder(title = "选择目录") {
-      if (IS_TAURI && window.__TAURI__.dialog) {
-        const sel = await window.__TAURI__.dialog.open({ directory: true, title });
+      if (IS_TAURI) {
+        const sel = await _invoke("plugin:dialog|open", { options: { directory: true, title } });
         return typeof sel === "string" ? sel : "";
       }
       await _delay(100);
@@ -515,12 +597,12 @@
     /* ---------------- 项目管理 ---------------- */
 
     async pickProject() {
-      if (IS_TAURI && window.__TAURI__.dialog) {
-        const sel = await window.__TAURI__.dialog.open({ directory: true, title: "选择项目目录" });
+      if (IS_TAURI) {
+        const sel = await _invoke("plugin:dialog|open", { options: { directory: true, title: "选择项目目录" } });
         return typeof sel === "string" ? sel : "";
       }
       await _delay(100);
-      return "";
+      return new URLSearchParams(window.location.search).get("publishPreview") ? "C:\\preview\\npm-workspace" : "";
     },
 
     async inspectProject(path) {

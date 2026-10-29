@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="1092" viewBox="0 0 2048 1092" fill="none">
+  <title>开发环境生长的纸上花园</title>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1800" y2="1092" gradientUnits="userSpaceOnUse"><stop stop-color="#e8f0e3"/><stop offset=".55" stop-color="#faf8ed"/><stop offset="1" stop-color="#f1f4e9"/></linearGradient>
+    <linearGradient id="leaf" x1="0" y1="0" x2="90" y2="140" gradientUnits="userSpaceOnUse"><stop stop-color="#c5d9bb"/><stop offset="1" stop-color="#73a79b"/></linearGradient>
+    <linearGradient id="trunk" x1="130" y1="600" x2="500" y2="600" gradientUnits="userSpaceOnUse"><stop stop-color="#abc6b0"/><stop offset=".5" stop-color="#658f82"/><stop offset="1" stop-color="#c7d5b1"/></linearGradient>
+    <radialGradient id="wash"><stop stop-color="#81b3a0" stop-opacity=".17"/><stop offset="1" stop-color="#81b3a0" stop-opacity="0"/></radialGradient>
+    <pattern id="grain" width="8" height="8" patternUnits="userSpaceOnUse"><circle cx="1" cy="2" r=".5" fill="#5c7969" opacity=".08"/><circle cx="5" cy="6" r=".5" fill="#887b55" opacity=".06"/></pattern>
+    <g id="sprig"><path d="M0 80C-4 40 24 8 56 0C64 36 42 71 0 80Z" fill="url(#leaf)" stroke="#72998a" stroke-opacity=".4"/><path d="M0 80L44 15" stroke="#f4f3d9" stroke-width="2"/></g>
+  </defs>
+  <path fill="url(#paper)" d="M0 0h2048v1092H0z"/>
+  <ellipse cx="230" cy="930" rx="630" ry="160" fill="url(#wash)"/>
+  <ellipse cx="220" cy="200" rx="640" ry="490" fill="url(#wash)"/>
+  <g stroke="#7e9e8a" stroke-width="2" opacity=".18"><path d="M0 850h1990M0 880h1780M0 910h2048"/><path d="M60 0v1092M90 0v1092"/></g>
+  <path d="M145 1000C304 910 224 815 203 721C171 587 243 477 283 363C326 241 242 126 319 0H394C305 134 390 236 346 374C298 526 248 589 272 721C297 858 375 944 306 1000Z" fill="url(#trunk)" opacity=".54"/>
+  <path d="M245 998C316 854 204 747 245 594C267 510 304 421 319 335C338 221 289 103 359 0" stroke="#e9edce" stroke-width="5" opacity=".65"/>
+  <g stroke="#71998a" stroke-linecap="round" opacity=".48">
+    <path d="M265 570C150 437 137 315 0 269M311 414C433 280 552 260 717 215M306 300C236 203 155 143 0 120M331 211C452 154 494 49 484 0M263 650C137 571 115 517 0 525" stroke-width="9"/>
+    <path d="M103 361C142 301 122 252 99 225M470 278C443 207 461 169 499 146M559 254C632 321 702 300 761 326M224 207C250 130 218 64 179 0M130 567C115 655 59 683 0 700" stroke-width="4"/>
+  </g>
+  <g opacity=".46">
+    <use href="#sprig" transform="translate(50 244) rotate(-80) scale(1.4)"/><use href="#sprig" transform="translate(90 330) rotate(5) scale(1.3)"/>
+    <use href="#sprig" transform="translate(163 448) rotate(-108) scale(1.35)"/><use href="#sprig" transform="translate(395 347) rotate(-4) scale(1.1)"/>
+    <use href="#sprig" transform="translate(443 233) rotate(-43) scale(1.05)"/><use href="#sprig" transform="translate(550 214) rotate(49) scale(1.3)"/>
+    <use href="#sprig" transform="translate(638 258) rotate(-12) scale(.9)"/><use href="#sprig" transform="translate(754 301) rotate(55) scale(.8)"/>
+    <use href="#sprig" transform="translate(163 174) rotate(-80) scale(1.1)"/><use href="#sprig" transform="translate(252 116) rotate(18) scale(1.2)"/>
+    <use href="#sprig" transform="translate(427 125) rotate(3) scale(1.15)"/><use href="#sprig" transform="translate(65 592) rotate(-95) scale(1.15)"/>
+    <use href="#sprig" transform="translate(89 665) rotate(19) scale(.8)"/><use href="#sprig" transform="translate(603 95) rotate(42) scale(.8)"/>
+  </g>
+  <g fill="#cfbd82" opacity=".42"><path d="M730 821q24-8 41 8q-25 6-41-8Z"/><path d="M482 940q21-13 40 1q-22 12-40-1Z"/><path d="M1070 948q26-6 39 11q-26 3-39-11Z"/></g>
+  <g stroke="#739b8a" stroke-opacity=".15"><path d="M113 975h440m-360 14h530m-221 15h314"/><ellipse cx="320" cy="994" rx="305" ry="33"/><ellipse cx="320" cy="994" rx="400" ry="48"/></g>
+  <path fill="url(#grain)" d="M0 0h2048v1092H0z"/>
+</svg>

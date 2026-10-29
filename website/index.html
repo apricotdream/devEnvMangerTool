@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="DevEnvManager：用桌面界面与 CLI 管理 Node.js、Python、Go 和 Git。版本切换、镜像配置、项目环境与 npm 发布，一个工作台完成。">
+  <meta name="theme-color" content="#0d1117">
+  <title>DevEnvManager · 开发环境，井然有序</title>
+  <link rel="icon" href="assets/logo.png"><link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="header wrap">
+    <a class="brand" href="./"><img src="assets/logo.png" width="38" height="38" alt=""><span>DevEnvManager<small>开发环境管理工具</small></span></a>
+    <nav aria-label="主导航"><a href="#workbench">在线体验</a><a href="#cli">命令行</a><a href="https://github.com/apricotdream/devEnvMangerTool" target="_blank" rel="noopener noreferrer">GitHub ↗</a></nav>
+  </header>
+  <main id="main">
+    <section class="hero wrap">
+      <p class="eyebrow"><span></span> 为日常开发，留出更多专注</p>
+      <h1>开发环境，<br><em>井然有序。</em></h1>
+      <div class="hero-bottom"><p>从 Node.js 到 Go，从版本切换到包发布。<br>把分散的环境配置，收进一个熟悉的工作台。</p><div class="actions"><a class="button primary" href="#downloads">获取应用 <span>↓</span></a><a class="button" href="demo/">打开在线演示 <span>↗</span></a></div></div>
+      <div class="language-strip" aria-label="支持的环境"><span><i class="node"></i>Node.js</span><span><i class="python"></i>Python</span><span><i class="go"></i>Go</span><span><i class="git"></i>Git</span><p>Windows 桌面 · Windows / Linux / WSL 命令行</p></div>
+    </section>
+
+    <section id="workbench" class="workbench wrap">
+      <div class="section-heading"><div><p class="eyebrow">01 / 工作台</p><h2>点开看看，操作就在手边。</h2></div><a class="text-link" href="demo/">全屏体验 ↗</a></div>
+      <div class="demo-toolbar"><div class="demo-tabs" role="tablist" aria-label="选择演示环境"><button role="tab" aria-selected="true" data-page="node">Node.js</button><button role="tab" aria-selected="false" data-page="python">Python</button><button role="tab" aria-selected="false" data-page="go">Go</button><button role="tab" aria-selected="false" data-page="git">Git</button></div><span class="demo-note">交互演示 · 模拟数据</span></div>
+      <div class="demo-frame" role="tabpanel" aria-label="环境管理交互演示"><iframe id="demoFrame" src="demo/?page=node" title="DevEnvManager 在线交互演示（模拟数据）" loading="lazy"></iframe></div>
+      <p class="caption">可自由切换环境与管理选项。演示数据仅在页面中生效；安装应用后才能管理本机环境。</p>
+      <p id="featureCopy" class="feature-copy" aria-live="polite">Node.js / 多版本安装与切换、npm 镜像、包管理器、项目配置与发布演练。</p>
+    </section>
+
+    <section class="details wrap" aria-label="功能介绍">
+      <div class="detail-intro"><p class="eyebrow">从配置，到开始写代码</p><h2>少一点来回，<br>多一点掌控。</h2><p>沿用同一套界面与操作逻辑，照顾不同语言的真实需求。</p></div>
+      <dl class="detail-list"><div><dt><span>01</span> 让版本跟着项目走</dt><dd>识别 Node、Python 和 Go 项目配置，按项目要求安装、切换环境。</dd></div><div><dt><span>02</span> 网络与工具，一处打理</dt><dd>配置 npm / pip 镜像与 Go 模块代理，管理包管理器和 Go 开发工具。</dd></div><div><dt><span>03</span> 发布前，先心里有数</dt><dd>npm 发布支持打包演练、账号切换、公开包选项和 OTP 错误提示。</dd></div><div><dt><span>04</span> 更新，按你的节奏</dt><dd>桌面启动时检查一次，随时手动检查；更新包通过 SHA256 校验后再安装。</dd></div></dl>
+    </section>
+
+    <section id="cli" class="cli-section wrap">
+      <div class="section-heading"><div><p class="eyebrow">02 / 命令行</p><h2>同一套能力，也能交给脚本。</h2></div></div>
+      <div class="cli-layout"><div><p>无参数启动数字菜单；明确参数即可用于脚本。GUI 与 CLI 共用 Rust 核心逻辑。</p><div class="command-options" role="group" aria-label="选择示例命令"><button aria-pressed="true" data-command="go">Go 管理</button><button aria-pressed="false" data-command="publish">发布演练</button><button aria-pressed="false" data-command="update">应用更新</button></div></div><div class="terminal"><div class="terminal-head"><span>devenv · shell</span><button id="copyCommand" aria-label="复制示例命令">复制</button></div><pre><code id="commandText">devenv go status
+devenv go versions
+devenv go project . --apply</code></pre><p id="copyStatus" role="status">检测 Go 环境，查看版本，为当前项目应用配置。</p></div></div>
+    </section>
+
+    <section id="downloads" class="downloads wrap"><p class="eyebrow">03 / 开始使用</p><h2>把环境安顿好，<br>开始下一次创造。</h2><div class="download-links"><a class="button primary" href="https://gitee.com/apricotdream/devEnvMangerTool/releases" target="_blank" rel="noopener noreferrer">Gitee 下载 <span>↗</span></a><a class="button" href="https://github.com/apricotdream/devEnvMangerTool/releases" target="_blank" rel="noopener noreferrer">GitHub 下载 <span>↗</span></a><a class="text-link" href="https://github.com/apricotdream/devEnvMangerTool" target="_blank" rel="noopener noreferrer">查看源码 ↗</a></div><p>Windows 安装包与 CLI，Linux / WSL CLI。请按系统架构选择发行附件。</p></section>
+  </main>
+  <footer class="wrap"><span>DevEnvManager <span class="footer-dot">/</span> Apache-2.0</span><div><a href="https://gitee.com/apricotdream/devEnvMangerTool">Gitee</a><a href="https://github.com/apricotdream/devEnvMangerTool/issues">反馈问题 ↗</a><a href="#main">回到顶部 ↑</a></div></footer>
+  <script src="site.js"></script>
+</body>
+</html>

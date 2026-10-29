@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "dev-env-manager"
-version = "0.2.8-beta"
+version = "0.2.9-beta"
 dependencies = [
  "devenv-core",
  "serde_json",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-core"
-version = "0.2.8-beta"
+version = "0.2.9-beta"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -688,8 +688,10 @@ dependencies = [
  "dirs",
  "indexmap 2.14.1",
  "regex",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-plugin-dialog",
  "thiserror 2.0.20",

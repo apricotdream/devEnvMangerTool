@@ -26,26 +26,34 @@
       </div>
 
       <nav class="nav">
-        <button class="nav-item active" data-page="node">
+        <button class="nav-item active" data-page="node" aria-label="Node.js" title="Node.js">
           <span class="nav-dot" style="--dot:#a78bfa"></span>
-          Node.js
+          <span class="nav-label">Node.js</span>
           <span class="nav-check">✓</span>
         </button>
-        <button class="nav-item" data-page="git">
+        <button class="nav-item" data-page="git" aria-label="Git" title="Git">
           <span class="nav-dot" style="--dot:#f05133"></span>
-          Git
+          <span class="nav-label">Git</span>
           <span class="nav-check">✓</span>
         </button>
-        <button class="nav-item" data-page="python">
+        <button class="nav-item" data-page="python" aria-label="Python" title="Python">
           <span class="nav-dot" style="--dot:#ffd343"></span>
-          Python
+          <span class="nav-label">Python</span>
+          <span class="nav-check">✓</span>
+        </button>
+        <button class="nav-item" data-page="go" aria-label="Go" title="Go">
+          <span class="nav-dot" style="--dot:#00add8"></span>
+          <span class="nav-label">Go</span>
           <span class="nav-check">✓</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
-        <span class="dot pulse"></span>
-        <span>v0.2.0-beta</span>
+        <span class="app-version-group"><span class="dot"></span><span id="appVersion">读取版本…</span></span>
+        <button id="appUpdateEntry" class="btn btn-ghost app-update-entry" title="检查应用更新" aria-label="检查应用更新">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 16v4h16v-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="app-update-label">检查更新</span>
+        </button>
       </div>
     </aside>
 
@@ -76,6 +84,11 @@
         </div>
       </header>
 
+      <div id="appUpdateNotice" class="app-update-notice hidden" role="status">
+        <span id="appUpdateNoticeText"></span>
+        <div class="app-update-notice-actions"><button id="appUpdateNoticeOpen" class="btn btn-mini btn-ghost">查看更新</button><button id="appUpdateNoticeClose" class="btn btn-mini btn-ghost" aria-label="关闭更新提示">✕</button></div>
+      </div>
+
       <!-- Node 页的 Tab 栏（Git/Go/Python 页隐藏） -->
       <nav class="tab-bar" id="tabBar">
         <button class="tab-item active" data-tab="1">环境诊断</button>
@@ -104,6 +117,70 @@
       </nav>
 
       <!-- Tab 1: 环境诊断 -->
+      <nav class="tab-bar hidden" id="goTabBar" aria-label="Go 环境管理">
+        <button class="tab-item active" data-go-tab="status">环境诊断</button>
+        <button class="tab-item" data-go-tab="proxy">模块代理</button>
+        <button class="tab-item" data-go-tab="versions">Go 版本</button>
+        <button class="tab-item" data-go-tab="tools">工具管理</button>
+        <button class="tab-item" data-go-tab="project">项目管理</button>
+      </nav>
+      <div id="goNotice" class="go-notice hidden" role="status"></div>
+
+      <section class="tab-panel hidden" id="goPanel-status">
+        <div class="card">
+          <div class="card-head"><h3>Go 环境诊断</h3><button class="btn btn-mini btn-ghost" data-go-refresh>重新检测</button></div>
+          <div id="gostatusError" class="result-msg go-error hidden" role="alert"></div>
+          <div id="goStatusInfo" aria-live="polite">等待检测…</div>
+          <div id="goStatusWarning" class="go-notice hidden"></div>
+          <div class="card-actions"><button id="goStatusInstall" class="btn btn-primary">安装 Go</button><button id="goFixPath" class="btn btn-ghost" disabled>修复 PATH</button></div>
+        </div>
+      </section>
+      <section class="tab-panel hidden" id="goPanel-proxy">
+        <div class="card">
+          <div class="card-head"><h3>Go 模块代理</h3><button class="btn btn-mini btn-ghost" data-go-refresh>读取配置</button></div>
+          <div id="goproxyError" class="result-msg go-error hidden" role="alert"></div>
+          <div class="go-form">
+            <label for="goProxyPreset">常用代理</label>
+            <select id="goProxyPreset" class="input"><option value="">选择代理或在下方输入</option><option value="https://proxy.golang.org,direct">官方代理</option><option value="https://goproxy.cn,direct">goproxy.cn</option><option value="https://goproxy.io,direct">goproxy.io</option><option value="direct">直接访问代码仓库</option></select>
+            <label for="goProxyUrl">GOPROXY</label><input id="goProxyUrl" class="input mono" value="https://proxy.golang.org,direct" placeholder="https://proxy.example.com,direct" spellcheck="false" />
+            <p class="hint">支持逗号或竖线分隔的回退地址；direct 表示直接访问仓库，off 表示禁用下载。</p>
+            <label for="goPrivate">GOPRIVATE</label><input id="goPrivate" class="input mono" placeholder="如 git.company.com/*；留空清除" spellcheck="false" />
+            <p class="hint">私有模块使用逗号分隔的路径模式，跳过公共代理和公共校验服务。</p>
+            <p id="goProxyConfig" class="hint go-wrap"></p>
+          </div>
+          <div class="card-actions"><button id="goProxySave" class="btn btn-primary">保存配置</button><button id="goProxyTest" class="btn btn-ghost">测试连接</button></div>
+          <div id="goProxyResult" class="result-msg go-wrap" role="status"></div>
+        </div>
+      </section>
+      <section class="tab-panel hidden" id="goPanel-versions">
+        <div class="card">
+          <div class="card-head"><h3>Go 版本管理</h3><button class="btn btn-mini btn-ghost" data-go-refresh>刷新版本</button></div>
+          <p id="goInstallDir" class="hint go-wrap"></p>
+          <div id="goversionsError" class="result-msg go-error hidden" role="alert"></div>
+          <label class="go-field-label" for="goVersionInput">安装版本</label>
+          <div class="go-install-row"><input id="goVersionInput" class="input mono" list="goAvailable" placeholder="留空安装最新稳定版" spellcheck="false" /><datalist id="goAvailable"></datalist><button id="goInstall" class="btn btn-primary">安装并切换</button></div>
+          <p class="hint">下拉提供各系列最新补丁，也可输入完整版本。下载支持官方与镜像源，均使用官方 SHA256 校验。</p>
+          <div id="goInstalled" class="go-list" aria-live="polite"></div>
+        </div>
+      </section>
+      <section class="tab-panel hidden" id="goPanel-tools">
+        <div class="card">
+          <div class="card-head"><h3>Go 开发工具</h3><button class="btn btn-mini btn-ghost" data-go-refresh>刷新工具</button></div>
+          <p class="hint">工具通过 go install 安装到 GOBIN 或 GOPATH/bin；需要先安装 Go。</p>
+          <div id="gotoolsError" class="result-msg go-error hidden" role="alert"></div>
+          <div id="goToolsList" class="go-list" aria-live="polite"></div>
+        </div>
+      </section>
+      <section class="tab-panel hidden" id="goPanel-project">
+        <div class="card">
+          <div class="card-head"><h3>Go 项目管理</h3><button id="goProjectPick" class="btn btn-mini btn-ghost">选择项目</button></div>
+          <div id="goprojectError" class="result-msg go-error hidden" role="alert"></div>
+          <div id="goProjectInfo" aria-live="polite"><div class="empty">选择包含 go.mod 或 go.work 的项目，查看版本要求并应用环境。</div></div>
+          <p class="hint">读取 go、toolchain 声明及工作区配置，应用后下载模块依赖。</p>
+          <div class="card-actions"><button id="goProjectApply" class="btn btn-primary" disabled>应用环境并下载依赖</button></div>
+        </div>
+      </section>
+
       <section class="tab-panel" id="tabPanel1">
 
         <!-- 概览卡片 -->
@@ -309,7 +386,7 @@
               <button id="btnPubScan" class="btn btn-mini">扫描可发包</button>
             </div>
           </div>
-          <div class="fix-status" id="pubStatus">打开项目目录，扫描 packages/ 下的可发布包（支持 workspace monorepo）</div>
+          <div class="fix-status" id="pubStatus">打开项目目录，扫描根目录与 packages/ 下的可发布包</div>
 
           <div class="pub-registry-row">
             <span class="pub-label">发布源</span>
@@ -317,6 +394,11 @@
             <input id="pubRegistry" class="source-custom mono" placeholder="https://your-nexus:port/repository/npm-hosted/" />
           </div>
           <div class="fix-status pub-ca" id="pubCaStatus">—</div>
+          <div class="pub-registry-row">
+            <label class="pub-label" for="pubAccess">可见性</label>
+            <select id="pubAccess" class="pub-account-sel"><option value="">遵循包配置</option><option value="public">公开（public）</option><option value="restricted">私有（restricted）</option></select>
+            <label class="pub-opt"><input type="checkbox" id="pubDryRun" /> 仅演练（不上传）</label>
+          </div>
 
           <div class="project-info" id="pubPackageList">
             <div class="empty">尚未扫描</div>
@@ -652,7 +734,27 @@
     </div>
   </div>
 
+  <dialog id="appUpdateDialog" class="app-update-dialog" aria-labelledby="appUpdateTitle">
+    <div class="modal-header"><h2 id="appUpdateTitle">应用更新</h2><button id="appUpdateClose" class="modal-close" aria-label="关闭应用更新">✕</button></div>
+    <div class="app-update-body">
+      <dl class="app-update-versions"><div><dt>当前版本</dt><dd id="updateCurrentVersion" class="mono">—</dd></div><div><dt>最新版本</dt><dd id="updateLatestVersion" class="mono">—</dd></div></dl>
+      <p id="updateStatus" class="app-update-status" role="status" aria-live="polite">正在准备检查更新…</p>
+      <progress id="updateProgress" class="app-update-progress hidden" aria-label="更新安装包下载进度"></progress>
+      <p id="updateLastChecked" class="hint"></p>
+      <section id="updateNotesWrap" class="hidden"><h3>更新说明</h3><div id="updateNotes" class="app-update-notes"></div></section>
+      <p id="updateInstallHint" class="hint hidden">点击「退出并安装」将关闭当前应用并打开安装向导。</p>
+    </div>
+    <div class="app-update-actions">
+      <button id="updateRelease" class="btn btn-ghost hidden">发布页面</button>
+      <button id="updateCheck" class="btn btn-ghost">检查更新</button>
+      <button id="updateDownload" class="btn btn-primary hidden">下载安装包</button>
+      <button id="updateInstall" class="btn btn-primary hidden">退出并安装</button>
+    </div>
+  </dialog>
+
   <script src="backend.js"></script>
+  <script src="app-update.js"></script>
+  <script src="go.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

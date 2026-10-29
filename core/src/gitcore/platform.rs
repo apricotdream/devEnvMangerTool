@@ -354,7 +354,7 @@ mod tests {
         let env: &Env = &getter;
         assert_eq!(
             fallback_ssh_dir("win32", env, Path::new(r"C:\Users\u"), Path::new(r"C:\Temp")),
-            PathBuf::from(r"C:\Users\u\AppData\Local\git-env-gui\ssh")
+            PathBuf::from(r"C:\Users\u\AppData\Local").join("git-env-gui").join("ssh")
         );
     }
 
@@ -365,7 +365,7 @@ mod tests {
         let env: &Env = &getter;
         assert_eq!(
             fallback_ssh_dir("win32", env, Path::new(r"C:\Users\u"), Path::new(r"C:\Temp")),
-            PathBuf::from(r"C:\Temp\git-env-gui\ssh")
+            PathBuf::from(r"C:\Temp").join("git-env-gui").join("ssh")
         );
     }
 
@@ -402,12 +402,12 @@ mod tests {
         let getter = env_from(&map);
         let env: &Env = &getter;
         let git = command_candidates("git", "win32", env, Path::new(r"C:\Users\u"));
-        assert!(git.contains(&PathBuf::from(r"C:\Users\u\scoop\shims\git.exe")));
-        assert!(git.contains(&PathBuf::from(r"C:\Program Files\Git\cmd\git.exe")));
-        assert!(git.contains(&PathBuf::from(r"C:\Program Files\Git\bin\git.exe")));
+        assert!(git.contains(&PathBuf::from(r"C:\Users\u").join("scoop/shims/git.exe")));
+        assert!(git.contains(&PathBuf::from(r"C:\Program Files").join("Git/cmd/git.exe")));
+        assert!(git.contains(&PathBuf::from(r"C:\Program Files").join("Git/bin/git.exe")));
 
         let ssh = command_candidates("ssh", "win32", env, Path::new(r"C:\Users\u"));
-        assert!(ssh.contains(&PathBuf::from(r"C:\Windows\System32\OpenSSH\ssh.exe")));
+        assert!(ssh.contains(&PathBuf::from(r"C:\Windows").join("System32/OpenSSH/ssh.exe")));
     }
 
     #[test]

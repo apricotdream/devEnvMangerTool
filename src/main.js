@@ -638,7 +638,12 @@
   function setPageTopbar(page) {
     const title = document.querySelector(".topbar-title h1");
     const subtitle = document.querySelector(".topbar-title p");
-    if (page === "git") {
+    if (page === "go") {
+      title.textContent = "Go 环境";
+      subtitle.textContent = "检测 · 版本 · 模块代理 · 工具 · 项目";
+      els.healthPill.className = "pill pill-neutral";
+      els.healthPill.textContent = "● 待检测";
+    } else if (page === "git") {
       title.textContent = "Git 环境";
       subtitle.textContent = "账号 · SSH · 身份 · 仓库同步";
       window.Backend.detectGit().then((info) => {
@@ -1048,7 +1053,7 @@
             if (v.authType === "basic") {
               return "⚠️ npmjs 官方<b>不接受 basic 认证</b>（用户名+密码），发布必失败。请改选 <b>Token</b>。";
             }
-            return "npmjs 官方只认 <b>token</b>。还没有？<a href=\"https://www.npmjs.com/settings/apricotdream/tokens\" target=\"_blank\" rel=\"noopener\">去 npmjs 创建 token</a>（选 Publish 作用域，发布免 OTP）";
+            return "npmjs 官方只认 <b>token</b>。还没有？<a href=\"https://docs.npmjs.com/creating-and-viewing-access-tokens/\" target=\"_blank\" rel=\"noopener\">查看 Token 创建说明</a>（选择目标包写入权限，并按包的 2FA 策略配置）";
           },
         },
         {
@@ -1955,12 +1960,14 @@
       for (const acc of file.accounts || []) {
         const opt = document.createElement("option");
         opt.value = acc.registry || "";
+        opt.dataset.accountId = acc.id;
         opt.textContent = `${acc.name} · ${acc.registry || ""}`;
         sel.appendChild(opt);
       }
       const active = (file.accounts || []).find((a) => a.id === file.active);
       if (active?.registry) {
-        sel.value = active.registry;
+        const activeOption = Array.from(sel.options).find((option) => option.dataset.accountId === active.id);
+        if (activeOption) sel.selectedIndex = activeOption.index;
         els.pubRegistry.value = active.registry;
       } else {
         // 无激活账号时默认选公网 npmjs
@@ -2027,7 +2034,7 @@
   function renderPubPackages(pkgs) {
     const box = els.pubPackageList;
     if (!pkgs.length) {
-      box.innerHTML = '<div class="empty">未发现 packages/ 下的可发布包</div>';
+      box.innerHTML = '<div class="empty">未发现根目录或 packages/ 下的可发布包</div>';
       return;
     }
     const html = pkgs.map((p) => {
@@ -2054,7 +2061,7 @@
     }
     // 发布前自动扫描 ~/.npmrc 外部账号，提示可用凭据（静默，不阻断发布）
     scanNpmrcCreds();
-    const selected = els._pubPackages.filter((p) => {
+    const selected = (els._pubPackages || []).filter((p) => {
       const ckid = "pubck_" + p.dir.replace(/[^a-zA-Z0-9_]/g, "_");
       const cb = document.getElementById(ckid);
       return cb && cb.checked;
@@ -2064,10 +2071,12 @@
       return;
     }
     const build = els.pubBuild.checked;
+    const dryRun = $("#pubDryRun").checked;
+    const access = $("#pubAccess").value || null;
     const ok = await showModal(
-      "发布确认",
-      `将发布 ${selected.length} 个包到：\n${registry}\n\n${selected.map((p) => `· ${p.name}@${p.version}`).join("\n")}\n\n构建: ${build ? "是" : "否"}`,
-      "发布",
+      dryRun ? "发布演练确认" : "发布确认",
+      `将发布 ${selected.length} 个包到：\n${registry}\n\n${selected.map((p) => `· ${p.name}@${p.version}`).join("\n")}\n\n构建: ${build ? "是" : "否"}\n模式: ${dryRun ? "仅演练，不上传" : "真实发布"}\n可见性: ${access || "遵循包配置"}`,
+      dryRun ? "开始演练" : "发布",
     );
     if (!ok) return;
     setBtnLoading(els.btnPubPublish, true, "发布中…");
@@ -2075,22 +2084,27 @@
     els.pubStatus.textContent = `发布中（${selected.length} 个包）…`;
     try {
       const dirs = selected.map((p) => p.dir);
-      let results = await window.Backend.publishPackages(dirs, registry, build, null);
+      const accountOption = els.pubAccountSel.selectedOptions[0];
+      if (!dryRun && accountOption?.dataset.accountId && accountOption.value.replace(/\/+$/, "") === registry.replace(/\/+$/, "")) {
+        await window.Backend.switchAccount(accountOption.dataset.accountId);
+      }
+      let results = await window.Backend.publishPackages(dirs, registry, build, null, dryRun, access);
       // 账号 2FA：若 npm 报 EOTP，提示输入一次性验证码并带 OTP 重发失败的包
       if (results.some((r) => r.needsOtp)) {
         const otp = await promptInputModal(
           "需要一次性验证码（2FA）",
-          "该账号启用了两步验证。请在手机验证器查看 6 位验证码并输入。\n若输入后仍失败，可改用 bypass-2FA 的 Automation token（详见结果区提示）。",
+          "npm 明确要求一次性验证码。请输入当前有效的 OTP；仅重试需要验证码的包。",
           "6 位验证码",
           { text: "如何在验证器查看 OTP（npmjs 2FA 说明）", url: "https://go.npm.me/2fa-guide" },
         );
         if (otp) {
           els.pubStatus.textContent = `重新发布（带 OTP）…`;
-          const failedDirs = dirs.filter((_, i) => !results[i].ok);
-          results = await window.Backend.publishPackages(failedDirs, registry, build, otp);
+          const retryIndexes = results.map((result, index) => result.needsOtp ? index : -1).filter((index) => index >= 0);
+          const retried = await window.Backend.publishPackages(retryIndexes.map((index) => dirs[index]), registry, false, otp, dryRun, access);
+          retryIndexes.forEach((index, offset) => { results[index] = retried[offset]; });
         }
       }
-      renderPubResults(results);
+      renderPubResults(results, dryRun);
     } catch (e) {
       els.pubStatus.textContent = `发布失败: ${e.message}`;
       log("err", `发布失败: ${e.message}`);
@@ -2100,10 +2114,10 @@
     }
   }
 
-  function renderPubResults(results) {
+  function renderPubResults(results, dryRun = false) {
     const box = els.pubPackageList;
     const okCount = results.filter((r) => r.ok).length;
-    els.pubStatus.textContent = `发布完成：成功 ${okCount}/${results.length}`;
+    els.pubStatus.textContent = `${dryRun ? "演练完成（未上传）" : "发布完成"}：成功 ${okCount}/${results.length}`;
     const html = results.map((r) => {
       const badge = r.ok
         ? `<span class="pub-tag ok">✓ 成功</span>`
@@ -3173,12 +3187,15 @@
   /* ---------------- 事件绑定 ---------------- */
 
   function bind() {
+    window.GoUI.init({ log, confirm: showModal, loading: withFullscreenLoading, form: openFormModal });
     bindTabs();
 
     els.btnDetect.addEventListener("click", () => {
       const activeNav = document.querySelector(".nav-item.active")?.dataset.page;
       // 仅手动点击时加全屏遮罩；安装/切换后自动触发的 runDetect 不走这里，不弹遮罩
-      if (activeNav === "git") {
+      if (activeNav === "go") {
+        window.GoUI.status();
+      } else if (activeNav === "git") {
         withFullscreenLoading("检测中…", () => loadGitAccounts()).catch(() => {});
       } else if (activeNav === "python") {
         withFullscreenLoading("检测中…", () => loadPythonDetect(false)).catch(() => {});
@@ -3233,8 +3250,16 @@
       item.addEventListener("click", () => {
         const page = item.dataset.page;
         els.console.innerHTML = ""; // 切换导航时清空控制台
+        $("#goTabBar").classList.toggle("hidden", page !== "go");
+        $("#goNotice").classList.add("hidden");
         $$(".nav-item").forEach((n) => n.classList.toggle("active", n === item));
-        if (page === "node") {
+        if (page === "go") {
+          els.tabBar.classList.add("hidden");
+          els.gitTabBar.classList.add("hidden");
+          els.pythonTabBar.classList.add("hidden");
+          setPageTopbar("go");
+          window.GoUI.activate("status");
+        } else if (page === "node") {
           els.tabBar.classList.remove("hidden");
           els.gitTabBar.classList.add("hidden");
           els.pythonTabBar.classList.add("hidden");
@@ -3327,6 +3352,7 @@
   async function init() {
     bind();
     initTheme();
+    void window.AppUpdates.init();
     if (window.Backend.IS_TAURI) {
       els.envTag.textContent = "Tauri 已连接";
       els.envTag.classList.add("tag-info");
@@ -3341,6 +3367,12 @@
     els.fullscreenLoading?.classList.remove("hidden");
     try {
       await runDetect(false);
+      if (!window.Backend.IS_TAURI) {
+        const page = new URLSearchParams(window.location.search).get("page");
+        if (["node", "python", "go", "git"].includes(page)) {
+          document.querySelector(`.nav-item[data-page="${page}"]`)?.click();
+        }
+      }
     } finally {
       const remain = Math.max(0, 400 - (performance.now() - loadStart));
       setTimeout(() => els.fullscreenLoading?.classList.add("hidden"), remain);

@@ -531,6 +531,28 @@ pub fn ensure_local_bin_in_path() -> Vec<String> {
     touched
 }
 
+/// 将 Go 工具等自定义 bin 目录加入各 shell 的 PATH，沿用幂等配置块。
+pub fn ensure_bin_in_path(bin: &Path) -> Result<(), String> {
+    if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|p| p == bin) { return Ok(()); }
+    let escaped = bin.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$").replace('`', "\\`");
+    let line = format!("export PATH=\"{escaped}:$PATH\"");
+    let mut touched = false;
+    for name in [".bashrc", ".zshrc"] {
+        let path = home_dir().join(name);
+        if path.exists() {
+            write_rc_block(&path, "# >>> devenv go tools >>>", "# <<< devenv go tools <<<", &[&line])?;
+            touched = true;
+        }
+    }
+    let fish = config_home().join("fish/conf.d/devenv-go-tools.fish");
+    let fish_bin = bin.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'");
+    crate::runtime::atomic_write(&fish, format!("fish_add_path '{fish_bin}'\n").as_bytes())?;
+    if !touched {
+        write_rc_block(&home_dir().join(".profile"), "# >>> devenv go tools >>>", "# <<< devenv go tools <<<", &[&line])?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Git 缺失提示（Q8）：识别常见包管理器，给精确命令，不替跑 sudo
 // ---------------------------------------------------------------------------
@@ -691,7 +713,7 @@ pub fn list_versions() -> VersionsInfo {
             }
         }
     }
-    installed.sort_by(|a, b| b.version.cmp(&a.version));
+    installed.sort_by_key(|v| std::cmp::Reverse(crate::runtime::version_key(&v.version)));
     VersionsInfo {
         nvm_detected: false,
         install_dir: install_dir.to_string_lossy().to_string(),
@@ -1375,40 +1397,7 @@ pub fn install_python_pkg_manager(name: String, version: Option<String>) -> Resu
 
 /// `.nvmrc` / engines.node 解析为可安装的具体版本（v 前缀）。裸主版本/lts 取可用列表里的最佳匹配。
 fn resolve_node_req(raw: &str, available: &[String]) -> Option<String> {
-    let t = raw.trim();
-    if t.is_empty() {
-        return None;
-    }
-    if let Some(c) = regex::Regex::new(r"^v?(\d+\.\d+\.\d+)$").ok().and_then(|re| re.captures(t)) {
-        return Some(format!("v{}", &c[1]));
-    }
-    if let Some(c) = regex::Regex::new(r"^v?(\d+)$").ok().and_then(|re| re.captures(t)) {
-        let major: i32 = c[1].parse().unwrap_or(0);
-        return available.iter().find(|v| v.starts_with(&format!("v{major}."))).cloned();
-    }
-    if t == "lts" || t.starts_with("lts/") || t == "node" {
-        return available
-            .iter()
-            .find(|v| {
-                v.strip_prefix('v')
-                    .and_then(|s| s.split('.').next())
-                    .and_then(|m| m.parse::<i32>().ok())
-                    .map(|m| m % 2 == 0)
-                    .unwrap_or(false)
-            })
-            .cloned();
-    }
-    // engines 形如 ">=18" / "18.x" / "^20.1.0"：抓第一个数字段
-    if let Some(c) = regex::Regex::new(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?").ok().and_then(|re| re.captures(t)) {
-        if let (Some(maj), Some(min), Some(pat)) = (c.get(1), c.get(2), c.get(3)) {
-            return Some(format!("v{}.{}.{}", maj.as_str(), min.as_str(), pat.as_str()));
-        }
-        if let Some(maj) = c.get(1) {
-            let major: i32 = maj.as_str().parse().unwrap_or(0);
-            return available.iter().find(|v| v.starts_with(&format!("v{major}."))).cloned();
-        }
-    }
-    None
+    crate::runtime::resolve_node_requirement(raw, available)
 }
 
 pub fn inspect_node_project(path: String) -> Result<ProjectInfo, String> {
@@ -1480,7 +1469,7 @@ pub fn inspect_node_project(path: String) -> Result<ProjectInfo, String> {
 }
 
 pub fn apply_node_project(path: String) -> Result<String, String> {
-    let info = inspect_node_project(path)?;
+    let info = inspect_node_project(path.clone())?;
     let mut msgs = Vec::new();
     if let Some(req) = &info.node_requirement {
         if !info.node_installed {
@@ -1495,7 +1484,7 @@ pub fn apply_node_project(path: String) -> Result<String, String> {
     // corepack 仅在存在时尝试（缺失则跳过，不强制安装）
     if let Some(pm) = &info.package_manager {
         if find_in_path("corepack").is_some() {
-            let _ = run_cmd("corepack", &["use", pm]);
+            crate::runtime::checked_output(crate::new_cmd("corepack").current_dir(&path).args(["use", pm]))?;
             msgs.push(format!("corepack 已激活 {pm}"));
         } else {
             msgs.push(format!("检测到 packageManager={pm}，但未安装 corepack，已跳过"));

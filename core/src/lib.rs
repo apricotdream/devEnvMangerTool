@@ -14,6 +14,10 @@ use std::process::Command;
 #[cfg(feature = "gui")]
 mod git_cmds;
 pub mod gitcore;
+mod runtime;
+pub mod go;
+pub mod app_update;
+mod npm_publish;
 // Linux 后端（Node/Python 自管安装 + 软链切换），仅 Linux 目标编译。
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -610,7 +614,7 @@ pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, St
 
         emit("downloading");
         let _ = std::fs::remove_file(&zip_path);
-        run_cmd("curl.exe", &["-L", "-s", "-o", &zip_path, &zip_url]);
+        runtime::checked_output(new_cmd("curl.exe").args(["-fLSs", "--connect-timeout", "10", "--max-time", "600", "-o", &zip_path, &zip_url]))?;
         let zip = Path::new(&zip_path);
         if !zip.exists() {
             return Err("下载 Node 失败（curl 未生成文件）".to_string());
@@ -644,7 +648,8 @@ pub fn install_specific(version: &str, emit: impl Fn(&str)) -> Result<String, St
         if !Path::new(&extracted).exists() {
             return Err("解压 Node 失败：解压后未找到目标目录".to_string());
         }
-        let _ = std::fs::rename(&extracted, &target);
+        std::fs::rename(&extracted, &target).map_err(|e| format!("安装目录写入失败：{e}；请清理残留目录后重试：{target}"))?;
+        if !Path::new(&target).join("node.exe").is_file() { return Err("安装后未找到 node.exe".to_string()); }
         let _ = std::fs::remove_file(&zip_path);
     }
     Ok(target)
@@ -670,20 +675,17 @@ fn accounts_path() -> String {
     }
 }
 
-fn read_accounts() -> AccountsFile {
-    std::fs::read_to_string(accounts_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn read_accounts() -> Result<AccountsFile, String> {
+    match std::fs::read_to_string(accounts_path()) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("账号配置损坏，请先修复 accounts.json：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AccountsFile::default()),
+        Err(e) => Err(format!("读取账号配置失败：{e}")),
+    }
 }
 
 fn write_accounts(file: &AccountsFile) -> Result<(), String> {
-    let path = accounts_path();
-    if let Some(parent) = Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    let json = serde_json::to_vec_pretty(file).map_err(|e| e.to_string())?;
+    runtime::atomic_write(Path::new(&accounts_path()), &json)
 }
 
 /// registry URL -> npmrc key，如 http://host:port/path/ -> //host:port/path/
@@ -790,7 +792,7 @@ fn scan_npmrc_credentials() -> Vec<NpmrcCredential> {
         Ok(c) => c,
         Err(_) => return Vec::new(), // 无 .npmrc
     };
-    let managed = read_accounts();
+    let managed = match read_accounts() { Ok(file) => file, Err(_) => return Vec::new() };
     let managed_keys: Vec<String> = managed
         .accounts
         .iter()
@@ -925,7 +927,7 @@ fn import_npmrc_credential(registry: String) -> Result<AccountsFile, String> {
     }
     let mut account = found.ok_or_else(|| format!("~/.npmrc 中未找到 {} 的凭据", reg))?;
 
-    let mut file = read_accounts();
+    let mut file = read_accounts()?;
     // 已登记则更新，否则新增
     if let Some(existing) = file.accounts.iter_mut().find(|a| npmrc_key(&a.registry) == want_key) {
         existing.auth_type = account.auth_type.clone();
@@ -966,29 +968,6 @@ fn credential_line(account: &Account) -> String {
             account.token.as_deref().unwrap_or("")
         ),
     }
-}
-
-/// 检查发布目标 registry 是否已有可用的 .npmrc 凭据（用户级 + 发布目录级）。
-/// npmjs 官方只认 token（`_authToken`），basic（`_auth`）会被拒，因此对 npmjs 只认 token 行。
-fn has_registry_credential(registry: &str, dir: &str) -> bool {
-    let key = npmrc_key(registry);
-    let is_npmjs = registry.contains("npmjs.org");
-    let paths = vec![user_npmrc_path(), format!("{}/.npmrc", dir)];
-    for p in paths {
-        if let Ok(content) = std::fs::read_to_string(&p) {
-            for line in content.lines() {
-                let l = line.trim_start();
-                if l.starts_with(&key) {
-                    let is_token = l.contains("_authToken=");
-                    let is_basic = l.contains("_auth=");
-                    if is_token || (!is_npmjs && is_basic) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 /// 账号凭据应写入/读取的 .npmrc 路径：项目级账号写项目文件，否则写全局。
@@ -1151,20 +1130,32 @@ fn detect_current_node_version() -> Option<String> {
 }
 
 fn dir_size(path: &Path) -> Option<u64> {
-    fn walk(p: &Path, total: &mut u64) {
-        if let Ok(entries) = std::fs::read_dir(p) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    walk(&e.path(), total);
-                } else if let Ok(m) = e.metadata() {
-                    *total += m.len();
-                }
-            }
-        }
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type SizeCache = Mutex<HashMap<PathBuf, (Instant, Option<u64>)>>;
+    static CACHE: OnceLock<SizeCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(Mutex::default);
+    let mut entries = cache.lock().unwrap();
+    if let Some((time, size)) = entries.get(path) {
+        if time.elapsed() < Duration::from_secs(60) { return *size; }
     }
-    let mut total = 0u64;
-    walk(path, &mut total);
-    Some(total)
+    entries.insert(path.to_path_buf(), (Instant::now(), None));
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        fn walk(path: &Path) -> u64 {
+            std::fs::read_dir(path).into_iter().flatten().flatten().map(|entry| {
+                match entry.file_type() {
+                    Ok(kind) if kind.is_symlink() => 0,
+                    Ok(kind) if kind.is_dir() => walk(&entry.path()),
+                    _ => entry.metadata().map(|m| m.len()).unwrap_or(0),
+                }
+            }).sum()
+        }
+        let size = walk(&path);
+        CACHE.get().unwrap().lock().unwrap().insert(path, (Instant::now(), Some(size)));
+    });
+    None
 }
 
 fn fetch_available_versions() -> Vec<String> {
@@ -1247,7 +1238,7 @@ fn update_user_path_for_node(target: &str) -> Result<(), String> {
          $parts = $p -split ';' | Where-Object {{ $_ -notmatch 'nodejs\\\\v\\d' -and $_ -notmatch 'nodejs\\\\current' }}; \
          $new = ($t + ';' + ($parts -join ';')).TrimEnd(';'); \
          [Environment]::SetEnvironmentVariable('Path', $new, 'User')",
-        target
+        target.replace('\'', "''")
     );
     let out = new_cmd("powershell")
         .args(["-NoProfile", "-Command", &ps])
@@ -1656,7 +1647,9 @@ fn list_publish_packages(project_dir: String) -> Result<Vec<PublishPackage>, Str
         return Err("项目目录不存在".to_string());
     }
     let mut pkgs = Vec::new();
-    for pj in find_package_jsons(&project_dir) {
+    let mut manifests = find_package_jsons(&project_dir);
+    if root.join("package.json").is_file() { manifests.insert(0, root.join("package.json")); }
+    for pj in manifests {
         let Ok(content) = std::fs::read_to_string(&pj) else {
             continue;
         };
@@ -1751,12 +1744,8 @@ fn check_registry_package(registry: String, name: String) -> RegistryPackageChec
 
 /// 在指定目录跑 npm 命令（自动注入 NODE_EXTRA_CA_CERTS 以信任已锚定的自签证书）。
 fn run_npm_in(dir: &str, args: &[&str]) -> (i32, String) {
-    let all_pem = Path::new(&certs_dir()).join("all.pem");
-    let mut cmd = new_cmd(npm_bin());
-    cmd.current_dir(dir).args(args);
-    if all_pem.exists() {
-        cmd.env("NODE_EXTRA_CA_CERTS", &all_pem);
-    }
+    let mut cmd = npm_publish::command(dir);
+    cmd.args(args);
     match cmd.output() {
         Ok(o) => {
             let code = o.status.code().unwrap_or(-1);
@@ -1789,20 +1778,22 @@ fn prerelease_tag(version: &str) -> Option<String> {
 /// `otp`：一次性验证码（账号 2FA 需要时由前端提示输入后带上重试）。
 /// `dry_run`：Some(true) 时追加 `--dry-run`，只打包演练不真正上传（CLI 发布前预检用）。
 ///   Option 使旧的 GUI 调用（不传该参）仍等价于真实发布。
-#[cfg_attr(feature = "gui", tauri::command)]
-fn publish_packages(
+fn publish_packages_impl(
     packages: Vec<String>,
     registry: String,
     build: bool,
     otp: Option<String>,
     dry_run: Option<bool>,
+    access: Option<String>,
 ) -> Result<Vec<PublishResult>, String> {
     let dry_run = dry_run.unwrap_or(false);
     let reg = registry.trim().to_string();
     if reg.is_empty() {
         return Err("请填写发布源 registry".to_string());
     }
-    let is_npmjs = reg.contains("npmjs.org");
+    let is_npmjs = npm_publish::is_official(&reg);
+    let access = access.as_deref().filter(|s| !s.is_empty());
+    npm_publish::arguments(&reg, "0.0.0", None, dry_run, access)?;
     let otp_arg = otp
         .as_deref()
         .map(str::trim)
@@ -1822,34 +1813,28 @@ fn publish_packages(
             format!("{}@{}", name, version)
         };
 
-        // 0) npmjs 凭据预检：官方只认 token，无凭据时给可执行的提示
-        if is_npmjs && !has_registry_credential(&reg, dir) {
-            results.push(PublishResult {
-                name: display,
-                version: version.clone(),
-                ok: false,
-                needs_otp: false,
-                message: "未检测到 npmjs 凭据。发布到 npmjs 官方需要 token：\n\
-                    1. 「上传登录」页新建/编辑 npmjs 账号（认证类型 Token，registry=https://registry.npmjs.org）\n\
-                    2. 保存后在该账号点「切换」，把 _authToken 写入 ~/.npmrc\n\
-                    或直接执行：npm login --registry=https://registry.npmjs.org/"
-                    .to_string(),
-                hint: None,
-            });
+        if name.is_empty() || semver::Version::parse(&version).is_err() || v["private"].as_bool() == Some(true) {
+            results.push(PublishResult { name:display, version, ok:false, needs_otp:false,
+                message:"包名/版本号无效，或 package.json 标记了 private:true，已停止该包发布".into(), hint:None });
             continue;
+        }
+        // npm 自行解析用户、项目、workspace 根目录与环境变量凭据；dry-run 不需要发布凭据。
+        if is_npmjs && !dry_run {
+            let (code, output) = run_npm_in(dir, &["whoami", "--registry", &reg, "--fetch-retries", "0", "--fetch-timeout", "15000"]);
+            if code != 0 {
+                let (message, needs_otp, hint) = npm_publish::failure(&reg, &output);
+                results.push(PublishResult { name:display, version, ok:false, needs_otp, message, hint });
+                continue;
+            }
         }
 
         // 1) 版本撞车预检
-        let check = check_registry_package(reg.clone(), name.clone());
+        let check = if dry_run {
+            RegistryPackageCheck { exists:false, versions:vec![], error:None }
+        } else { npm_publish::check_metadata(dir, &reg, &name) };
         if let Some(e) = &check.error {
-            results.push(PublishResult {
-                name: display,
-                version: version.clone(),
-                ok: false,
-                needs_otp: false,
-                message: format!("预检失败: {}", e),
-                hint: None,
-            });
+            let (message, needs_otp, hint) = npm_publish::failure(&reg, e);
+            results.push(PublishResult { name:display, version:version.clone(), ok:false, needs_otp, message, hint });
             continue;
         }
         if check.exists && check.versions.iter().any(|v| v == &version) {
@@ -1883,24 +1868,7 @@ fn publish_packages(
         // 3) 发布
         // 预发布版本（如 0.9.0-beta）必须显式指定 dist-tag，否则 npm 拒绝发布到默认 latest。
         let pub_tag = prerelease_tag(&version);
-        let mut npm_args: Vec<String> = vec![
-            "publish".into(),
-            "--registry".into(),
-            reg.clone(),
-            "--fetch-retries".into(),
-            "0".into(),
-        ];
-        if let Some(tag) = &pub_tag {
-            npm_args.push("--tag".into());
-            npm_args.push(tag.clone());
-        }
-        if dry_run {
-            npm_args.push("--dry-run".into());
-        }
-        if let Some(otp) = &otp_arg {
-            npm_args.push("--otp".into());
-            npm_args.push(otp.clone());
-        }
+        let npm_args = npm_publish::arguments(&reg, &version, otp_arg.as_deref(), dry_run, access)?;
         let arg_refs: Vec<&str> = npm_args.iter().map(|s| s.as_str()).collect();
         let (code, out) = run_npm_in(dir, &arg_refs);
         if code == 0 {
@@ -1909,42 +1877,14 @@ fn publish_packages(
                 version,
                 ok: true,
                 needs_otp: false,
-                message: match &pub_tag {
+                message: if dry_run { "演练成功（未上传）".into() } else { match &pub_tag {
                     Some(t) => format!("发布成功（tag: {}）", t),
                     None => "发布成功".to_string(),
-                },
+                } },
                 hint: None,
             });
         } else {
-            let lower = out.to_lowercase();
-            let eotp = lower.contains("eotp") || lower.contains("one-time password");
-            // npmjs 官方 403：账号要求 2FA（可输入 OTP 发布），或需 bypass-2FA token。
-            let npmjs_2fa = is_npmjs
-                && (lower.contains("two-factor authentication")
-                    || lower.contains("bypass 2fa")
-                    || lower.contains("granular access token"));
-            let needs_otp = eotp || npmjs_2fa;
-            let (message, hint) = if npmjs_2fa {
-                (
-                    "发布被拒（403）：npmjs 要求两步验证（2FA）。\n\
-                     ① 若账号已启用 2FA：在手机验证器查看 6 位验证码并输入，即可发布（推荐，符合 npmjs 明年强制 2FA 的方向）\n\
-                     ② 若输入 OTP 后仍失败：说明当前 token 是 granular 类型，需在 npmjs 生成 Automation（bypass-2FA）token 并更新本账号\n\
-                     ③ 更新后在「上传登录」点「切换」生效"
-                        .to_string(),
-                    Some(PublishHint {
-                        text: "npmjs 2FA 与 Token 说明 ↗".to_string(),
-                        url: "https://docs.npmjs.com/about-two-factor-authentication"
-                            .to_string(),
-                    }),
-                )
-            } else if eotp {
-                (
-                    "发布需要一次性验证码（账号 2FA）：请在手机验证器查看 OTP 并重新发布。".to_string(),
-                    None,
-                )
-            } else {
-                (format!("发布失败:\n{}", out), None)
-            };
+            let (message, needs_otp, hint) = npm_publish::failure(&reg, &out);
             results.push(PublishResult {
                 name: display,
                 version,
@@ -1956,6 +1896,16 @@ fn publish_packages(
         }
     }
     Ok(results)
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+async fn publish_packages(
+    packages: Vec<String>, registry: String, build: bool,
+    otp: Option<String>, dry_run: Option<bool>, access: Option<String>,
+) -> Result<Vec<PublishResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || publish_packages_impl(packages, registry, build, otp, dry_run, access))
+        .await.map_err(|e| e.to_string())?
 }
 
 /// 检查 npm/Node 侧证书信任环境（NODE_EXTRA_CA_CERTS 是否指向工具管理的 all.pem）。
@@ -2010,13 +1960,13 @@ fn install_node(app: tauri::AppHandle) -> Result<InstallResult, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg_attr(feature = "gui", tauri::command)]
-fn list_accounts() -> AccountsFile {
+fn list_accounts() -> Result<AccountsFile, String> {
     read_accounts()
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
 fn save_account(account: Account) -> Result<AccountsFile, String> {
-    let mut file = read_accounts();
+    let mut file = read_accounts()?;
     let id = account.id.clone();
     let is_active = file.active.as_deref() == Some(id.as_str());
     if let Some(existing) = file.accounts.iter_mut().find(|a| a.id == id) {
@@ -2046,7 +1996,7 @@ fn save_account(account: Account) -> Result<AccountsFile, String> {
 
 #[cfg_attr(feature = "gui", tauri::command)]
 fn delete_account(id: String) -> Result<AccountsFile, String> {
-    let mut file = read_accounts();
+    let mut file = read_accounts()?;
     let target = file.accounts.iter().find(|a| a.id == id).cloned();
     file.accounts.retain(|a| a.id != id);
     if file.active.as_deref() == Some(&id) {
@@ -2062,7 +2012,7 @@ fn delete_account(id: String) -> Result<AccountsFile, String> {
 
 #[cfg_attr(feature = "gui", tauri::command)]
 fn switch_account(id: String) -> Result<AccountsFile, String> {
-    let mut file = read_accounts();
+    let mut file = read_accounts()?;
     let account = file
         .accounts
         .iter()
@@ -2077,7 +2027,10 @@ fn switch_account(id: String) -> Result<AccountsFile, String> {
 
 #[cfg_attr(feature = "gui", tauri::command)]
 fn test_account(id: String) -> RegistryTestResult {
-    let file = read_accounts();
+    let file = match read_accounts() {
+        Ok(file) => file,
+        Err(error) => return RegistryTestResult { error: Some(error), ..Default::default() },
+    };
     let account = match file.accounts.iter().find(|a| a.id == id) {
         Some(a) => a.clone(),
         None => {
@@ -2146,7 +2099,7 @@ fn list_versions() -> VersionsInfo {
             }
         }
     }
-    installed.sort_by(|a, b| b.version.cmp(&a.version));
+    installed.sort_by_key(|v| std::cmp::Reverse(runtime::version_key(&v.version)));
     let available = fetch_available_versions();
     VersionsInfo {
         nvm_detected: detect_nvm(),
@@ -2706,7 +2659,7 @@ fn uninstall_pkg_manager(name: String) -> Result<String, String> {
     Ok(msgs.join("；"))
 }
 
-/// 切换包管理器数据目录：迁移旧数据（robocopy /MOVE）并更新指向。
+/// 切换包管理器数据目录：先复制数据，更新指向成功后清理旧目录。
 /// pm2 用 PM2_HOME；bun 用 BUN_INSTALL；yarn 用 YARN_CACHE_FOLDER；pnpm 用 store-dir 配置。
 #[cfg_attr(feature = "gui", tauri::command)]
 fn switch_pkg_data_dir(name: String, target: String) -> Result<String, String> {
@@ -2721,23 +2674,36 @@ fn switch_pkg_data_dir(name: String, target: String) -> Result<String, String> {
         return Err("目标目录与当前数据目录相同".to_string());
     }
 
-    // 1) 迁移旧数据：robocopy /MOVE /E，退出码 0-7 为成功，>=8 为失败
+    if !["pm2", "bun", "yarn", "pnpm"].contains(&name.as_str()) {
+        return Err(format!("{name} 暂不支持切换数据目录"));
+    }
+    let source_path = if Path::new(&src).exists() {
+        Some(Path::new(&src).canonicalize().map_err(|e| format!("源目录不可用：{e}"))?)
+    } else { None };
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    let target_path = Path::new(&target).canonicalize().map_err(|e| e.to_string())?;
+    if let Some(source) = &source_path {
+        if target_path.starts_with(source) || source.starts_with(&target_path) {
+            return Err("源目录和目标目录不能相同或互相包含".to_string());
+        }
+    }
+    // 先复制并保留源目录，配置成功后才清理源。
+    // robocopy 退出码 0-7 为成功，>=8 为失败。
     if Path::new(&src).exists() {
         let _ = std::fs::create_dir_all(&target);
         let rc = new_cmd("robocopy")
-            .args([&src, &target, "/E", "/MOVE", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS"])
+            .args([&src, &target, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS"])
             .output()
             .map_err(|e| format!("启动迁移失败：{}", e))?;
         let code = rc.status.code().unwrap_or(-1);
-        if code >= 8 {
+        if !(0..8).contains(&code) {
             return Err(format!(
                 "数据迁移失败（robocopy 退出码 {}）：{}",
                 code,
                 String::from_utf8_lossy(&rc.stderr).trim()
             ));
         }
-        // /MOVE 通常已清空源；残留（锁文件等）兜底删除
-        let _ = delete_path_robust(Path::new(&src));
+
     } else {
         let _ = std::fs::create_dir_all(&target);
     }
@@ -2750,13 +2716,13 @@ fn switch_pkg_data_dir(name: String, target: String) -> Result<String, String> {
             set_user_env_var("BUN_INSTALL", Some(&target))?;
             let old_bin = format!("{}\\bin", src);
             let new_bin = format!("{}\\bin", target);
-            let _ = remove_path_entries_for_target(&old_bin);
+            remove_path_entries_for_target(&old_bin)?;
             let ps = format!(
                 "$d='{}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
                  if(-not ($p -split ';' -contains $d)){{ [Environment]::SetEnvironmentVariable('Path', $p.TrimEnd(';')+';'+$d,'User') }}",
                 new_bin.replace('\'', "''")
             );
-            let _ = new_cmd("powershell").args(["-NoProfile", "-Command", &ps]).output();
+            runtime::checked_output(new_cmd("powershell").args(["-NoProfile", "-Command", &ps]))?;
         }
         "yarn" => set_user_env_var("YARN_CACHE_FOLDER", Some(&target))?,
         "pnpm" => {
@@ -2774,6 +2740,11 @@ fn switch_pkg_data_dir(name: String, target: String) -> Result<String, String> {
         other => return Err(format!("{} 暂不支持切换数据目录", other)),
     }
 
+    if let Some(source) = source_path {
+        if let Err(e) = delete_path_robust(&source) {
+            return Ok(format!("{name} 已切换到 {target}；旧目录清理失败，数据保留在 {src}：{e}"));
+        }
+    }
     Ok(format!("{} 数据目录已切换到 {}（重开终端生效）", name, target))
 }
 
@@ -2797,48 +2768,10 @@ pub struct ProjectInfo {
 }
 
 fn resolve_nvmrc(content: &str) -> Option<String> {
-    let t = content.trim();
-    if t.is_empty() {
-        return None;
-    }
-    // 完整版本 v18.20.0 / 18.20.0
-    if let Some(v) = regex::Regex::new(r"^v?(\d+\.\d+\.\d+)$")
-        .ok()
-        .and_then(|re| re.captures(t))
-        .map(|c| format!("v{}", &c[1]))
-    {
-        return Some(v);
-    }
-    // 裸主版本 18 -> 解析为该大版本最新
-    if let Some(m) = regex::Regex::new(r"^(\d+)$")
-        .ok()
-        .and_then(|re| re.captures(t))
-        .map(|c| c[1].parse::<i32>().unwrap_or(0))
-    {
-        let info = list_versions();
-        let best = info
-            .available
-            .iter()
-            .find(|v| v.starts_with(&format!("v{}.", m)));
-        return best.cloned();
-    }
-    // lts / lts/* / node -> 最新 LTS
-    if t == "lts" || t.starts_with("lts/") || t == "node" {
-        let info = list_versions();
-        // available 按大版本降序，第一个偶数主版本即最新 LTS
-        return info
-            .available
-            .iter()
-            .find(|v| {
-                v.strip_prefix('v')
-                    .and_then(|s| s.split('.').next())
-                    .and_then(|m| m.parse::<i32>().ok())
-                    .map(|m| m % 2 == 0)
-                    .unwrap_or(false)
-            })
-            .cloned();
-    }
-    None
+    // 精确版本无需联网；范围用可用列表匹配。
+    let raw = content.trim().trim_start_matches('v');
+    if semver::Version::parse(raw).is_ok() { return Some(format!("v{raw}")); }
+    runtime::resolve_node_requirement(content, &fetch_available_versions())
 }
 
 /// 解析项目目录，返回项目要求的 Node/包管理器/registry，并与全局对比。
@@ -2946,7 +2879,7 @@ fn apply_project(path: String) -> Result<String, String> {
 
     // 2. 包管理器（package.json packageManager -> corepack）
     if let Some(pm) = &info.package_manager {
-        let _ = run_cmd("corepack", &["use", pm]);
+        runtime::checked_output(new_cmd("corepack").current_dir(&path).args(["use", pm]))?;
         msgs.push(format!("corepack 已激活 {}", pm));
     }
 
@@ -4311,7 +4244,7 @@ pub mod api {
     pub fn import_npmrc_credential(registry: String) -> Result<AccountsFile, String> {
         crate::import_npmrc_credential(registry)
     }
-    pub fn list_accounts() -> AccountsFile {
+    pub fn list_accounts() -> Result<AccountsFile, String> {
         crate::list_accounts()
     }
     pub fn switch_account(id: String) -> Result<AccountsFile, String> {
@@ -4329,8 +4262,9 @@ pub mod api {
         build: bool,
         otp: Option<String>,
         dry_run: Option<bool>,
+        access: Option<String>,
     ) -> Result<Vec<PublishResult>, String> {
-        crate::publish_packages(packages, registry, build, otp, dry_run)
+        crate::publish_packages_impl(packages, registry, build, otp, dry_run, access)
     }
 }
 
@@ -4379,6 +4313,7 @@ fn list_config_dirs() -> Vec<serde_json::Value> {
         add("pip 配置 (pip.ini)", format!("{}\\pip\\pip.ini", appdata));
     }
     add("Python 版本安装目录", python_install_root());
+    add("Go 版本安装目录", go::install_root().to_string_lossy().to_string());
     // Git
     add("SSH 密钥目录 (.ssh)", format!("{}\\.ssh", home));
     add("Git 全局配置 (.gitconfig)", format!("{}\\.gitconfig", home));
@@ -4406,6 +4341,11 @@ pub fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_dialog::init())
         .manage(git_cmds::ServiceState(std::sync::Arc::new(std::sync::Mutex::new(service))))
         .invoke_handler(tauri::generate_handler![
+            app_update::app_version,
+            app_update::check_app_update,
+            app_update::download_app_update,
+            app_update::install_app_update,
+            go::go_command,
             detect_node,
             read_registry,
             set_registry,
