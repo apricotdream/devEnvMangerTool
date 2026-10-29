@@ -94,7 +94,7 @@
     IS_TAURI,
 
     async appVersion() {
-      return IS_TAURI ? _invoke("app_version") : "0.2.9-beta";
+      return IS_TAURI ? _invoke("app_version") : "0.2.10-beta";
     },
     async checkAppUpdate(automatic = false) {
       if (IS_TAURI) return _invoke("check_app_update", { automatic });
@@ -102,7 +102,7 @@
       const mode = new URLSearchParams(window.location.search).get("updatePreview");
       if (mode === "error") throw new Error("预览：网络连接失败，请手动重试");
       const available = mode === "available";
-      return { currentVersion:"0.2.9-beta", latestVersion:available ? "0.2.10-beta" : "0.2.9-beta", available, canInstall:available,
+      return { currentVersion:"0.2.10-beta", latestVersion:available ? "0.2.11-beta" : "0.2.10-beta", available, canInstall:available,
         notes:"改进环境管理与发布体验。\n修复已知问题。", releaseUrl:"https://gitee.com/apricotdream/devEnvMangerTool/releases", message:null };
     },
     async downloadAppUpdate(version, onProgress) {

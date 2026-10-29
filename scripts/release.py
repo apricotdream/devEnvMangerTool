@@ -103,8 +103,12 @@ def main():
             env = {**os.environ, "RUSTFLAGS": "-C linker=rust-lld -C link-self-contained=yes"}
             run("cargo", "build", "-p", "devenv-core", "--bin", "devenv", "--release", "--locked", "--target", target, env=env)
             with tarfile.open(out / names[0], "w:gz") as archive:
-                archive.add(ROOT / f"target/{target}/release/devenv", arcname=name + "/devenv")
-            shutil.copy2(ROOT / "install.sh", out / "install.sh")
+                binary = ROOT / f"target/{target}/release/devenv"
+                info = archive.gettarinfo(str(binary), arcname=name + "/devenv")
+                info.mode = 0o755
+                with binary.open("rb") as stream:
+                    archive.addfile(info, stream)
+            (out / "install.sh").write_bytes((ROOT / "install.sh").read_bytes().replace(b"\r\n", b"\n"))
 
     files = [out / name for name in names]
     if any(not file.is_file() or file.stat().st_size == 0 for file in files):

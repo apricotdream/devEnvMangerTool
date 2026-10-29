@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "dev-env-manager"
-version = "0.2.9-beta"
+version = "0.2.10-beta"
 dependencies = [
  "devenv-core",
  "serde_json",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "devenv-core"
-version = "0.2.9-beta"
+version = "0.2.10-beta"
 dependencies = [
  "base64 0.22.1",
  "chrono",

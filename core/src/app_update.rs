@@ -12,8 +12,20 @@ const REPO: &str = "apricotdream/devEnvMangerTool";
 
 #[derive(Clone, Deserialize)]
 struct Asset {
+    #[serde(default)]
+    id: Option<u64>,
     name: String,
     browser_download_url: String,
+}
+
+impl Asset {
+    fn download_url(&self) -> String {
+        // GitHub API 的附件端点直接返回下载重定向，避开 release 网页直链的连接超时。
+        if self.browser_download_url.starts_with(&format!("https://github.com/{REPO}/releases/download/")) {
+            if let Some(id) = self.id { return format!("https://api.github.com/repos/{REPO}/releases/assets/{id}"); }
+        }
+        self.browser_download_url.clone()
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -178,8 +190,9 @@ fn download(selected: &str, emit: impl Fn(&str, u64)) -> Result<String, String> 
     let _download = DOWNLOAD.try_lock().map_err(|_| "更新任务正在进行，请勿重复操作")?;
     let candidate = STATE.lock().map_err(|e| e.to_string())?.candidate.clone().filter(|c| c.version == selected).ok_or("更新信息已变化，请重新检查")?;
     emit("checksums", 0);
+    let checksum_url = candidate.checksums.download_url();
     let text = checked_output(crate::new_cmd(crate::curl_bin()).args([
-        "-fLSs", "--connect-timeout", "5", "--max-time", "20", "--proto", "=https", "--proto-redir", "=https", &candidate.checksums.browser_download_url,
+        "-fLSs", "--connect-timeout", "5", "--max-time", "30", "--proto", "=https", "--proto-redir", "=https", "-H", "Accept: application/octet-stream", "-H", "User-Agent: DevEnvManager", &checksum_url,
     ]))?;
     let checksum = parse_checksum(&text, &candidate.installer.name)?;
     let directory = dirs::cache_dir().ok_or("无法确定更新缓存目录")?.join("DevEnvManager").join("updates").join(selected);
@@ -191,8 +204,8 @@ fn download(selected: &str, emit: impl Fn(&str, u64)) -> Result<String, String> 
         use std::process::Stdio;
         let mut child = crate::new_cmd(crate::curl_bin()).args([
             "-fLSs", "--connect-timeout", "8", "--max-time", "900", "--speed-limit", "1024", "--speed-time", "30",
-            "--proto", "=https", "--proto-redir", "=https", "-o",
-        ]).arg(&partial).arg(&candidate.installer.browser_download_url).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+            "--proto", "=https", "--proto-redir", "=https", "-H", "Accept: application/octet-stream", "-H", "User-Agent: DevEnvManager", "-o",
+        ]).arg(&partial).arg(candidate.installer.download_url()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
         loop {
             if child.try_wait().map_err(|e| e.to_string())?.is_some() { break; }
             emit("downloading", std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0));
@@ -300,8 +313,8 @@ mod tests {
         let prefix = format!("https://gitee.com/{REPO}/releases/download/{tag}/");
         let installer = format!("DevEnvManager_{v}_x64-setup.exe");
         Release { tag_name:tag.into(), github:false, body:None, created_at:None, assets:vec![
-            Asset { name:installer.clone(), browser_download_url:format!("{prefix}{installer}") },
-            Asset { name:"SHA256SUMS.txt".into(), browser_download_url:format!("{prefix}SHA256SUMS.txt") },
+            Asset { id:None, name:installer.clone(), browser_download_url:format!("{prefix}{installer}") },
+            Asset { id:None, name:"SHA256SUMS.txt".into(), browser_download_url:format!("{prefix}SHA256SUMS.txt") },
         ] }
     }
     #[test]
@@ -325,7 +338,7 @@ mod tests {
         let manifest = if cfg!(windows) { "SHA256SUMS-windows-x64.txt".into() }
             else { format!("SHA256SUMS-linux-{}.txt", std::env::consts::ARCH) };
         for name in [archive, manifest.clone()] {
-            item.assets.push(Asset { browser_download_url:format!("https://gitee.com/{REPO}/releases/download/v0.2.10-beta/{name}"), name });
+            item.assets.push(Asset { id:None, browser_download_url:format!("https://gitee.com/{REPO}/releases/download/v0.2.10-beta/{name}"), name });
         }
         let (info, candidate) = select_release_for(vec![item], "0.2.9-beta", "x64", true).unwrap();
         assert!(info.can_install);
