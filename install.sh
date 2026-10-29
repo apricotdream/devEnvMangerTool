@@ -32,8 +32,11 @@ DOWNLOAD_URL=""
 CHECKSUM_URL=""
 
 # ---------- 1) 本地已有 tarball（含 musl 回退）----------
-for pat in "devenv-$TARGET-*.tar.gz" "devenv-$ARCH-unknown-linux-musl-*.tar.gz"; do
-  if found="$(ls $pat 2>/dev/null | head -1)"; then
+version_glob="*"
+[[ "$VERSION" != latest ]] && version_glob="${VERSION#v}"
+for pat in "devenv-$TARGET-$version_glob.tar.gz" "devenv-$ARCH-unknown-linux-musl-$version_glob.tar.gz"; do
+  found="$(compgen -G "$pat" | sort -Vr | head -1 || true)"
+  if [[ -n "$found" ]]; then
     TARBALL="$found"
     echo "[*] 使用本地文件: $TARBALL"
     break
